@@ -15,12 +15,13 @@ from youtube_transcript_api._errors import (
 
 logger = logging.getLogger(__name__)
 
+# Create a single API instance
+_api = YouTubeTranscriptApi()
+
 
 def get_transcript(video_id: str) -> str | None:
     """
     Fetch the transcript for a YouTube video as plain text.
-
-    Tries to get the English transcript first, then falls back to any available language.
 
     Args:
         video_id: The YouTube video ID (e.g., 'dQw4w9WgXcQ')
@@ -48,8 +49,6 @@ def get_transcript_with_timestamps(video_id: str) -> list[dict] | None:
     """
     Fetch the transcript for a YouTube video with timestamp information.
 
-    Tries to get the English transcript first, then falls back to any available language.
-
     Args:
         video_id: The YouTube video ID (e.g., 'dQw4w9WgXcQ')
 
@@ -68,24 +67,26 @@ def get_transcript_with_timestamps(video_id: str) -> list[dict] | None:
         ...         print(f"{seg['start']:.1f}s: {seg['text']}")
     """
     try:
-        # Try English first
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
-        logger.debug(f"Found English transcript for video {video_id}")
-        return transcript
+        # Fetch transcript (library auto-selects best available)
+        transcript = _api.fetch(video_id)
+        logger.debug(f"Found transcript for video {video_id}")
 
-    except NoTranscriptFound:
-        # English not available, try any language
-        logger.debug(f"No English transcript for {video_id}, trying other languages")
-        try:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
-            logger.debug(f"Found transcript in another language for video {video_id}")
-            return transcript
-        except NoTranscriptFound:
-            logger.info(f"No transcript found in any language for video {video_id}")
-            return None
+        # Convert to list of dicts for compatibility
+        return [
+            {
+                "text": snippet.text,
+                "start": snippet.start,
+                "duration": snippet.duration,
+            }
+            for snippet in transcript.snippets
+        ]
 
     except TranscriptsDisabled:
         logger.info(f"Transcripts are disabled for video {video_id}")
+        return None
+
+    except NoTranscriptFound:
+        logger.info(f"No transcript found for video {video_id}")
         return None
 
     except VideoUnavailable:
