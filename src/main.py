@@ -136,9 +136,17 @@ def process_video(youtube_service, notion_client, video: dict, database_id: str)
 
     # Save to Notion
     logger.info(f"  Saving to Notion...")
+
+    # Convert key_points list to bullet-point string for Notion
+    key_points = summary_result.get("key_points", [])
+    if isinstance(key_points, list):
+        key_points_str = "\n".join(f"• {point}" for point in key_points)
+    else:
+        key_points_str = key_points or ""
+
     video_data.update({
         "summary": summary_result.get("summary", ""),
-        "key_points": summary_result.get("key_points", ""),
+        "key_points": key_points_str,
         "target_audience": summary_result.get("target_audience", ""),
     })
 
