@@ -1,7 +1,7 @@
 google-api-python-client==2.111.0
 google-auth-oauthlib==1.2.0
 google-auth-httplib2==0.2.0
-youtube-transcript-api>=1.0.0
+# Supadata API is used for transcripts (via requests)
 anthropic==0.40.0
 notion-client==2.2.1
 python-dotenv==1.0.0
