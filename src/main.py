@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from youtube import get_youtube_service, get_playlist_videos, get_video_details, move_video_to_playlist
 from transcript import get_transcript
 from summarizer import summarize_transcript
-from notion_client import get_notion_client, get_processed_video_ids, create_summary_page, create_error_page
+from notion_db import get_notion_client, get_processed_video_ids, create_summary_page, create_error_page
 
 # Configure logging
 logging.basicConfig(
