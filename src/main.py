@@ -17,6 +17,7 @@ from youtube import get_youtube_service, get_playlist_videos, get_video_details,
 from transcript import get_transcript
 from summarizer import summarize_transcript
 from notion_db import get_notion_client, get_processed_video_ids, create_summary_page, create_error_page
+from slack_notify import send_summary_notification
 
 # Configure logging
 logging.basicConfig(
@@ -153,6 +154,14 @@ def process_video(youtube_service, notion_client, video: dict, database_id: str)
     try:
         page_id = create_summary_page(notion_client, database_id, video_data)
         logger.info(f"  Created Notion page: {page_id}")
+
+        # Send Slack notification
+        logger.info(f"  Sending Slack notification...")
+        if send_summary_notification(video_data):
+            logger.info(f"  Slack notification sent")
+        else:
+            logger.warning(f"  Slack notification skipped or failed")
+
         return True
     except Exception as e:
         logger.error(f"  Failed to create Notion page: {e}")
