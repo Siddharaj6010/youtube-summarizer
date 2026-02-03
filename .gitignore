@@ -1,13 +1,13 @@
-# Environment variables - NEVER COMMIT
+# Environment variables (NEVER commit secrets)
 .env
 .env.local
-.env.production
+.env.*.local
 
-# OAuth credentials and tokens - NEVER COMMIT
+# OAuth credentials (NEVER commit)
 client_secret*.json
-credentials.json
 token.json
-*.token
+credentials.json
+*.pickle
 
 # Python
 __pycache__/
@@ -53,11 +53,6 @@ Thumbs.db
 logs/
 
 # Testing
+.pytest_cache/
 .coverage
 htmlcov/
-.pytest_cache/
-.tox/
-
-# Misc
-*.bak
-*.tmp
