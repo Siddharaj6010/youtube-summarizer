@@ -3,9 +3,13 @@ YouTube transcript fetching module.
 
 Uses the youtube-transcript-api library to fetch video transcripts.
 Handles various error cases gracefully by returning None instead of raising exceptions.
+
+Supports YouTube cookies to work around IP blocks on cloud providers.
 """
 
 import logging
+import os
+import requests
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
@@ -15,8 +19,31 @@ from youtube_transcript_api._errors import (
 
 logger = logging.getLogger(__name__)
 
+
+def _create_api_instance() -> YouTubeTranscriptApi:
+    """Create YouTubeTranscriptApi instance, optionally with cookies."""
+    cookies_str = os.environ.get("YOUTUBE_COOKIES", "")
+
+    if cookies_str:
+        # Parse cookies from environment variable
+        # Format: "cookie1=value1; cookie2=value2; ..."
+        session = requests.Session()
+        cookie_dict = {}
+        for cookie in cookies_str.split(";"):
+            cookie = cookie.strip()
+            if "=" in cookie:
+                key, value = cookie.split("=", 1)
+                cookie_dict[key.strip()] = value.strip()
+
+        session.cookies.update(cookie_dict)
+        logger.info("Using YouTube cookies for authentication")
+        return YouTubeTranscriptApi(http_client=session)
+
+    return YouTubeTranscriptApi()
+
+
 # Create a single API instance
-_api = YouTubeTranscriptApi()
+_api = _create_api_instance()
 
 
 def get_transcript(video_id: str) -> str | None:

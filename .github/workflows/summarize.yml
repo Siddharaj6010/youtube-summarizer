@@ -30,6 +30,7 @@ jobs:
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
           YOUTUBE_INPUT_PLAYLIST: ${{ secrets.YOUTUBE_INPUT_PLAYLIST }}
           YOUTUBE_OUTPUT_PLAYLIST: ${{ secrets.YOUTUBE_OUTPUT_PLAYLIST }}
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
