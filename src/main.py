@@ -103,17 +103,16 @@ def process_video(youtube_service, notion_client, video: dict, database_id: str)
     }
 
     if transcript is None:
-        # No transcript available - create error page
+        # No transcript available - create error page but don't move video
         error_msg = "No transcript available (captions disabled or not found)"
         logger.warning(f"  {error_msg}: {title}")
         send_processing_error_notification(title, video_data["url"], error_msg)
         try:
             create_error_page(notion_client, database_id, video_data, error_msg)
             logger.info(f"  Created error entry in Notion")
-            return True  # Still considered "processed" - move to output playlist
         except Exception as e:
             logger.error(f"  Failed to create Notion error page: {e}")
-            return False
+        return False
 
     # Summarize with Claude
     logger.info(f"  Summarizing with Claude Haiku...")
@@ -125,10 +124,9 @@ def process_video(youtube_service, notion_client, video: dict, database_id: str)
         send_processing_error_notification(title, video_data["url"], error_msg)
         try:
             create_error_page(notion_client, database_id, video_data, error_msg)
-            return True  # Move to output playlist anyway
         except Exception as e:
             logger.error(f"  Failed to create Notion error page: {e}")
-            return False
+        return False
 
     # Save to Notion
     logger.info(f"  Saving to Notion...")
