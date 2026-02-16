@@ -17,7 +17,7 @@ from youtube import get_youtube_service, get_playlist_videos, get_video_details,
 from transcript import get_transcript
 from summarizer import summarize_transcript
 from notion_db import get_notion_client, get_processed_video_ids, create_summary_page, create_error_page
-from slack_notify import send_summary_notification, send_error_notification, send_recovery_notification
+from slack_notify import send_summary_notification, send_processing_error_notification, send_error_notification, send_recovery_notification
 from cooldown import should_skip_run, record_failure, record_success
 
 # Configure logging
@@ -104,14 +104,11 @@ def process_video(youtube_service, notion_client, video: dict, database_id: str)
 
     if transcript is None:
         # No transcript available - create error page
-        logger.warning(f"  No transcript available for: {title}")
+        error_msg = "No transcript available (captions disabled or not found)"
+        logger.warning(f"  {error_msg}: {title}")
+        send_processing_error_notification(title, video_data["url"], error_msg)
         try:
-            create_error_page(
-                notion_client,
-                database_id,
-                video_data,
-                "No transcript available (captions disabled or not found)"
-            )
+            create_error_page(notion_client, database_id, video_data, error_msg)
             logger.info(f"  Created error entry in Notion")
             return True  # Still considered "processed" - move to output playlist
         except Exception as e:
@@ -123,14 +120,11 @@ def process_video(youtube_service, notion_client, video: dict, database_id: str)
     summary_result = summarize_transcript(title, channel, transcript)
 
     if "error" in summary_result:
-        logger.error(f"  Summarization failed: {summary_result['error']}")
+        error_msg = f"Summarization failed: {summary_result['error']}"
+        logger.error(f"  {error_msg}")
+        send_processing_error_notification(title, video_data["url"], error_msg)
         try:
-            create_error_page(
-                notion_client,
-                database_id,
-                video_data,
-                f"Summarization failed: {summary_result['error']}"
-            )
+            create_error_page(notion_client, database_id, video_data, error_msg)
             return True  # Move to output playlist anyway
         except Exception as e:
             logger.error(f"  Failed to create Notion error page: {e}")

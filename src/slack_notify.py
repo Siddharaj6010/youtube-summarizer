@@ -110,6 +110,72 @@ def send_summary_notification(video_data: dict) -> bool:
     return _send_slack_message(payload)
 
 
+def send_processing_error_notification(video_title: str, video_url: str, error_message: str) -> bool:
+    """
+    Send a notification when a video fails to process (transcript, summarization, etc.).
+
+    Args:
+        video_title: Title of the video that failed.
+        video_url: YouTube URL of the video.
+        error_message: Description of what went wrong.
+
+    Returns:
+        True if notification sent successfully, False otherwise.
+    """
+    webhook_url = get_webhook_url()
+    if not webhook_url:
+        return False
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "Video Processing Error",
+                "emoji": True
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{video_title}*"
+            }
+        },
+        {
+            "type": "divider"
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Error*\n```{error_message[:1500]}```"
+            }
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "View Video",
+                        "emoji": True
+                    },
+                    "url": video_url,
+                }
+            ]
+        },
+    ]
+
+    payload = {
+        "blocks": blocks,
+        "text": f"Processing error: {video_title} — {error_message[:200]}"
+    }
+
+    return _send_slack_message(payload)
+
+
 def send_error_notification(error_message: str, attempt: int, next_retry_minutes: int) -> bool:
     """
     Send an error notification to Slack with cooldown context.

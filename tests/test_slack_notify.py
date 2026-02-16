@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import requests
-from slack_notify import send_summary_notification, send_error_notification, send_recovery_notification
+from slack_notify import send_summary_notification, send_processing_error_notification, send_error_notification, send_recovery_notification
 
 
 def _sample_video_data():
@@ -73,6 +73,40 @@ class TestSendSummaryNotification:
         payload = call_kwargs["json"]
         assert "blocks" in payload
         assert "text" in payload  # fallback text
+
+
+class TestSendProcessingErrorNotification:
+    @patch("slack_notify.requests.post")
+    @patch("slack_notify.get_webhook_url", return_value="https://hooks.slack.com/test")
+    def test_successful_send(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_post.return_value = mock_resp
+
+        result = send_processing_error_notification(
+            "Test Video", "https://youtube.com/watch?v=abc", "Credit balance too low"
+        )
+        assert result is True
+
+    @patch("slack_notify.requests.post")
+    @patch("slack_notify.get_webhook_url", return_value="https://hooks.slack.com/test")
+    def test_includes_video_title_and_error(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_post.return_value = mock_resp
+
+        send_processing_error_notification(
+            "My Video", "https://youtube.com/watch?v=xyz", "No transcript"
+        )
+
+        call_kwargs = mock_post.call_args[1]
+        payload = call_kwargs["json"]
+        assert "My Video" in payload["text"]
+        assert "No transcript" in payload["text"]
+
+    @patch("slack_notify.get_webhook_url", return_value=None)
+    def test_no_webhook_returns_false(self, mock_url):
+        assert send_processing_error_notification("t", "u", "e") is False
 
 
 class TestSendErrorNotification:
