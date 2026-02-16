@@ -39,7 +39,7 @@ jobs:
           YOUTUBE_INPUT_PLAYLIST: ${{ secrets.YOUTUBE_INPUT_PLAYLIST }}
           YOUTUBE_OUTPUT_PLAYLIST: ${{ secrets.YOUTUBE_OUTPUT_PLAYLIST }}
           SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

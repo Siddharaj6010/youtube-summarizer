@@ -1,8 +1,8 @@
 """
-Claude Haiku Summarization Module
+Gemini 3 Flash Summarization Module
 
 This module provides functionality to summarize YouTube video transcripts
-using the Claude Haiku model via the Anthropic API.
+using the Gemini 3 Flash model via the OpenRouter API.
 """
 
 import os
@@ -10,35 +10,38 @@ import re
 import time
 from typing import Optional
 
-import anthropic
-from anthropic import APIError, RateLimitError
+import openai
+from openai import OpenAI
 
 
 # Constants
-MODEL_ID = "claude-3-haiku-20240307"
+MODEL_ID = "google/gemini-3-flash-preview"
 MAX_TOKENS = 1024
-MAX_TRANSCRIPT_LENGTH = 100_000  # Truncate to ~100k chars (Haiku has 200k context)
+MAX_TRANSCRIPT_LENGTH = 500_000  # Gemini has 1M token context, can handle much more
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 1.0
 
 
-def get_anthropic_client() -> anthropic.Anthropic:
+def get_openrouter_client() -> OpenAI:
     """
-    Create and return an Anthropic client using the API key from environment.
+    Create and return an OpenAI client configured for OpenRouter.
 
     Returns:
-        anthropic.Anthropic: Configured Anthropic client instance.
+        OpenAI: Configured OpenAI client pointing at OpenRouter.
 
     Raises:
-        ValueError: If ANTHROPIC_API_KEY environment variable is not set.
+        ValueError: If OPENROUTER_API_KEY environment variable is not set.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError(
-            "ANTHROPIC_API_KEY environment variable is not set. "
-            "Please set it with your Anthropic API key."
+            "OPENROUTER_API_KEY environment variable is not set. "
+            "Please set it with your OpenRouter API key."
         )
-    return anthropic.Anthropic(api_key=api_key)
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+    )
 
 
 def _truncate_transcript(transcript: str) -> str:
@@ -66,10 +69,10 @@ def _truncate_transcript(transcript: str) -> str:
 
 def _parse_response(response_text: str) -> dict:
     """
-    Parse the Claude response to extract summary, key points, and target audience.
+    Parse the model response to extract summary, key points, and target audience.
 
     Args:
-        response_text: Raw response text from Claude.
+        response_text: Raw response text from the model.
 
     Returns:
         dict: Parsed response with 'summary', 'key_points', and 'target_audience' keys.
@@ -119,9 +122,9 @@ def summarize_transcript(
     transcript: str
 ) -> dict:
     """
-    Summarize a YouTube video transcript using Claude Haiku.
+    Summarize a YouTube video transcript using Gemini 3 Flash via OpenRouter.
 
-    This function sends the transcript to Claude Haiku for summarization
+    This function sends the transcript to Gemini 3 Flash for summarization
     and returns a structured dict with the summary, key points, and
     target audience information.
 
@@ -181,37 +184,37 @@ TARGET AUDIENCE:
 
     for attempt in range(MAX_RETRIES):
         try:
-            client = get_anthropic_client()
+            client = get_openrouter_client()
 
-            message = client.messages.create(
+            response = client.chat.completions.create(
                 model=MODEL_ID,
                 max_tokens=MAX_TOKENS,
-                system=system_prompt,
                 messages=[
-                    {"role": "user", "content": user_prompt}
-                ]
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
             )
 
             # Extract text from response
-            response_text = message.content[0].text
+            response_text = response.choices[0].message.content
 
             # Parse and return the structured response
             return _parse_response(response_text)
 
-        except RateLimitError as e:
+        except openai.RateLimitError as e:
             last_error = e
             if attempt < MAX_RETRIES - 1:
                 time.sleep(backoff)
                 backoff *= 2  # Exponential backoff
             continue
 
-        except APIError as e:
+        except openai.APIError as e:
             # Return error dict for API errors
             return {
                 "summary": "",
                 "key_points": [],
                 "target_audience": "",
-                "error": f"Anthropic API error: {str(e)}"
+                "error": f"OpenRouter API error: {str(e)}"
             }
 
         except ValueError as e:

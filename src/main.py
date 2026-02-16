@@ -115,7 +115,7 @@ def process_video(youtube_service, notion_client, video: dict, database_id: str)
         return False
 
     # Summarize with Claude
-    logger.info(f"  Summarizing with Claude Haiku...")
+    logger.info(f"  Summarizing with Gemini 3 Flash...")
     summary_result = summarize_transcript(title, channel, transcript)
 
     if "error" in summary_result:
