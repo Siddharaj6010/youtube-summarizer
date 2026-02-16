@@ -59,8 +59,15 @@ def get_processed_video_ids(client: Client, database_id: str) -> set[str]:
     start_cursor = None
 
     while has_more:
-        # Build query parameters
-        query_params = {"database_id": database_id}
+        # Build query parameters — only count successfully summarized videos,
+        # so that error entries get retried on the next run.
+        query_params = {
+            "database_id": database_id,
+            "filter": {
+                "property": "Status",
+                "select": {"equals": "Summarized"},
+            },
+        }
         if start_cursor:
             query_params["start_cursor"] = start_cursor
 
