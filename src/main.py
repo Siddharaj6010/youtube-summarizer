@@ -17,7 +17,8 @@ from youtube import get_youtube_service, get_playlist_videos, get_video_details,
 from transcript import get_transcript
 from summarizer import summarize_transcript
 from notion_db import get_notion_client, get_processed_video_ids, create_summary_page, create_error_page
-from slack_notify import send_summary_notification
+from slack_notify import send_summary_notification, send_error_notification, send_recovery_notification
+from cooldown import should_skip_run, record_failure, record_success
 
 # Configure logging
 logging.basicConfig(
@@ -168,10 +169,27 @@ def process_video(youtube_service, notion_client, video: dict, database_id: str)
         return False
 
 
+def _handle_fatal_error(error_message: str) -> None:
+    """Record a fatal error with cooldown and notify via Slack, then exit."""
+    state = record_failure(error_message)
+    failures = state["consecutive_failures"]
+    backoff = state["backoff_minutes"]
+
+    send_error_notification(error_message, attempt=failures, next_retry_minutes=backoff)
+    sys.exit(1)
+
+
 def main():
     """Main entry point for the YouTube Video Summarizer."""
     # Load environment variables
     load_dotenv()
+
+    # --- Cooldown check ---
+    # Skip this run if we're in an active cooldown from previous failures
+    skip, cooldown_state = should_skip_run()
+    if skip:
+        logger.info("Skipping run due to active cooldown. Exiting cleanly.")
+        sys.exit(0)
 
     # Get required environment variables
     input_playlist = os.environ.get("YOUTUBE_INPUT_PLAYLIST")
@@ -188,8 +206,9 @@ def main():
         missing.append("NOTION_DATABASE_ID")
 
     if missing:
-        logger.error(f"Missing required environment variables: {', '.join(missing)}")
-        sys.exit(1)
+        error_msg = f"Missing required environment variables: {', '.join(missing)}"
+        logger.error(error_msg)
+        _handle_fatal_error(error_msg)
 
     logger.info("=" * 60)
     logger.info("YouTube Video Summarizer")
@@ -200,15 +219,17 @@ def main():
     try:
         youtube_service = get_youtube_service()
     except Exception as e:
-        logger.error(f"Failed to initialize YouTube service: {e}")
-        sys.exit(1)
+        error_msg = f"Failed to initialize YouTube service: {e}"
+        logger.error(error_msg)
+        _handle_fatal_error(error_msg)
 
     logger.info("Initializing Notion client...")
     try:
         notion_client = get_notion_client()
     except Exception as e:
-        logger.error(f"Failed to initialize Notion client: {e}")
-        sys.exit(1)
+        error_msg = f"Failed to initialize Notion client: {e}"
+        logger.error(error_msg)
+        _handle_fatal_error(error_msg)
 
     # Get videos from input playlist
     logger.info(f"Fetching videos from input playlist...")
@@ -216,11 +237,13 @@ def main():
         playlist_videos = get_playlist_videos(youtube_service, input_playlist)
         logger.info(f"Found {len(playlist_videos)} videos in input playlist")
     except Exception as e:
-        logger.error(f"Failed to fetch playlist videos: {e}")
-        sys.exit(1)
+        error_msg = f"Failed to fetch playlist videos: {e}"
+        logger.error(error_msg)
+        _handle_fatal_error(error_msg)
 
     if not playlist_videos:
         logger.info("No videos in input playlist. Nothing to do.")
+        record_success()
         return
 
     # Get already-processed video IDs from Notion
@@ -229,8 +252,9 @@ def main():
         processed_ids = get_processed_video_ids(notion_client, database_id)
         logger.info(f"Found {len(processed_ids)} already-processed videos in Notion")
     except Exception as e:
-        logger.error(f"Failed to fetch processed video IDs: {e}")
-        sys.exit(1)
+        error_msg = f"Failed to fetch processed video IDs: {e}"
+        logger.error(error_msg)
+        _handle_fatal_error(error_msg)
 
     # Filter to only new videos
     new_videos = [v for v in playlist_videos if v["video_id"] not in processed_ids]
@@ -238,6 +262,7 @@ def main():
 
     if not new_videos:
         logger.info("All videos already processed. Nothing to do.")
+        record_success()
         return
 
     # Process each new video
@@ -278,9 +303,20 @@ def main():
     logger.info(f"  Errors: {error_count}")
     logger.info("=" * 60)
 
-    # Exit with error code if any failures
-    if error_count > 0:
-        sys.exit(1)
+    # --- Cooldown: record outcome ---
+    if error_count > 0 and processed_count == 0:
+        # Complete failure - activate/extend cooldown
+        _handle_fatal_error(f"All {error_count} video(s) failed to process")
+    else:
+        # At least partial success - clear cooldown
+        previous_state = record_success()
+        if previous_state:
+            prev_failures = previous_state.get("consecutive_failures", 0)
+            send_recovery_notification(prev_failures)
+            logger.info(f"Sent recovery notification (was failing for {prev_failures} runs)")
+
+        if error_count > 0:
+            sys.exit(1)
 
 
 if __name__ == "__main__":

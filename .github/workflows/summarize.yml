@@ -22,6 +22,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore cooldown state
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/cooldown_state.json
+          key: cooldown-state-${{ github.run_id }}
+          restore-keys: |
+            cooldown-state-
+
       - name: Run summarizer
         run: python src/main.py
         env:
@@ -35,3 +43,11 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          COOLDOWN_STATE_PATH: /tmp/cooldown_state.json
+
+      - name: Save cooldown state
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: /tmp/cooldown_state.json
+          key: cooldown-state-${{ github.run_id }}
