@@ -77,11 +77,13 @@ def send_summary_notification(video_data: dict) -> bool:
 
     # Add key points if available
     if key_points:
+        # Convert standard markdown bold (**text**) to Slack mrkdwn bold (*text*)
+        slack_key_points = key_points.replace("**", "*")
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Key Points*\n{key_points}"
+                "text": f"*Key Points*\n{slack_key_points}"
             }
         })
 
