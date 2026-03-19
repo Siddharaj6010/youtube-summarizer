@@ -314,11 +314,13 @@ def increment_retry_count(
             logger.info(f"Created error page for {video_id}: retry 1")
             return 1
 
+    except APIError:
+        raise
     except Exception as e:
         # Don't let retry tracking errors crash the pipeline
-        # Log the error and return a high count to be safe
+        # Return a high count to be safe (triggers skip rather than infinite retry)
         logger.error(f"Failed to update retry count for {video_id}: {e}")
-        return 0
+        return MAX_RETRIES
 
 
 def mark_video_skipped(client: Client, database_id: str, video_id: str) -> None:
@@ -342,6 +344,8 @@ def mark_video_skipped(client: Client, database_id: str, video_id: str) -> None:
             logger.info(f"Marked video {video_id} as Skipped")
         else:
             logger.warning(f"No error page found for {video_id} to mark as Skipped")
+    except APIError:
+        raise
     except Exception as e:
         logger.error(f"Failed to mark {video_id} as Skipped: {e}")
 
