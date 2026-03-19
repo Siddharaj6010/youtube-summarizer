@@ -148,7 +148,7 @@ def process_video(youtube_service, notion_client, video: dict, database_id: str)
     # Build video_data for Notion
     key_points = summary_result.get("key_points", [])
     if isinstance(key_points, list):
-        key_points_str = "\n".join(f"\u2022 {point}" for point in key_points)
+        key_points_str = "\n".join(f"{i}. {point}" for i, point in enumerate(key_points, 1))
     else:
         key_points_str = key_points or ""
 
