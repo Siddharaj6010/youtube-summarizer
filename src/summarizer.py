@@ -16,7 +16,7 @@ from exceptions import VideoError, APIError
 
 # Constants
 MODEL_ID = "google/gemini-3-flash-preview"
-MAX_TOKENS = 4096
+MAX_TOKENS = 2048
 MAX_TRANSCRIPT_LENGTH = 500_000  # Gemini has 1M token context, can handle much more
 
 
@@ -141,30 +141,30 @@ def summarize_transcript(
     transcript = _truncate_transcript(transcript)
 
     # Build the user prompt
-    user_prompt = f"""Summarize this YouTube video transcript thoroughly. Your goal is to capture ALL important information so the reader does not need to watch the video.
+    user_prompt = f"""Summarize this YouTube video transcript. Be specific and informative but keep it skimmable.
 
 Title: {title}
 Channel: {channel}
 Transcript: {transcript}
 
 Provide:
-1. A comprehensive summary that covers every major topic, argument, example, and conclusion discussed in the video. Include specific details like names, numbers, tools, techniques, and quotes when mentioned. Write in paragraph form and be thorough — the reader should feel they watched the video after reading this.
-2. All key points, insights, and actionable takeaways. Do NOT limit yourself to a small number — include every notable point from the video.
-3. Who would find this video useful
+1. A single-paragraph summary (5-8 sentences) covering the main topics and conclusions. Include specific details like names, prices, specs, and tools when relevant — avoid vague statements like "he discusses the product."
+2. 5-10 key points capturing the most important takeaways. Each point should be one concise sentence with specific details.
+3. Who would find this video useful (1-2 sentences)
 
 Format your response as:
 SUMMARY:
-[thorough summary covering all major topics discussed — multiple paragraphs are fine]
+[single paragraph, 5-8 sentences]
 
 KEY POINTS:
 - [point 1]
 - [point 2]
-...(include as many points as needed to cover everything important)
+...
 
 TARGET AUDIENCE:
 [who would benefit]"""
 
-    system_prompt = "You create thorough, detailed YouTube video summaries that capture all important information so the reader doesn't need to watch the video. You include specific details, examples, names, and numbers rather than vague generalizations."
+    system_prompt = "You summarize YouTube video transcripts in a way that is specific and informative yet skimmable. You include concrete details (names, numbers, specs) rather than vague generalizations, but you stay concise."
 
     try:
         client = get_openrouter_client()
