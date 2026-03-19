@@ -14,10 +14,8 @@ from youtube import (
     get_video_details,
     move_video_to_playlist,
     _handle_http_error,
-    YouTubeAPIError,
-    QuotaExceededError,
-    InvalidVideoError,
 )
+from exceptions import VideoError, APIError
 from googleapiclient.errors import HttpError
 
 
@@ -72,7 +70,6 @@ class TestGetPlaylistVideos:
     def test_handles_pagination(self):
         mock_service = MagicMock()
 
-        # Page 1
         page1_request = MagicMock()
         page1_request.execute.return_value = {
             "items": [
@@ -84,7 +81,6 @@ class TestGetPlaylistVideos:
             ],
             "nextPageToken": "token_page2",
         }
-        # Page 2
         page2_request = MagicMock()
         page2_request.execute.return_value = {
             "items": [
@@ -139,13 +135,13 @@ class TestGetVideoDetails:
         assert details["duration"] == "PT10M30S"
         assert details["channel"] == "My Channel"
 
-    def test_video_not_found_raises(self):
+    def test_video_not_found_raises_video_error(self):
         mock_service = MagicMock()
         mock_request = MagicMock()
         mock_request.execute.return_value = {"items": []}
         mock_service.videos().list.return_value = mock_request
 
-        with pytest.raises(InvalidVideoError):
+        with pytest.raises(VideoError):
             get_video_details(mock_service, "nonexistent")
 
 
@@ -154,29 +150,39 @@ class TestGetVideoDetails:
 # ---------------------------------------------------------------------------
 
 class TestHandleHttpError:
-    def test_403_quota_exceeded(self):
+    def test_403_quota_exceeded_raises_api_error(self):
         error = _make_http_error(403, reason="quotaExceeded")
-        with pytest.raises(QuotaExceededError):
+        with pytest.raises(APIError) as exc_info:
             _handle_http_error(error, "test context")
+        assert exc_info.value.service == "YouTube"
+        assert exc_info.value.action_required is False
 
-    def test_403_daily_limit(self):
+    def test_403_daily_limit_raises_api_error(self):
         error = _make_http_error(403, reason="dailyLimitExceeded")
-        with pytest.raises(QuotaExceededError):
+        with pytest.raises(APIError) as exc_info:
             _handle_http_error(error, "test context")
+        assert "quota" in exc_info.value.user_message.lower()
 
-    def test_404_raises_invalid_video(self):
-        error = _make_http_error(404, reason="notFound")
-        with pytest.raises(InvalidVideoError):
+    def test_401_raises_api_error(self):
+        error = _make_http_error(401, reason="unauthorized")
+        with pytest.raises(APIError) as exc_info:
             _handle_http_error(error, "test context")
+        assert exc_info.value.action_required is True
 
-    def test_other_error_raises_youtube_api_error(self):
+    def test_500_raises_api_error(self):
         error = _make_http_error(500, reason="backendError")
-        with pytest.raises(YouTubeAPIError):
+        with pytest.raises(APIError) as exc_info:
+            _handle_http_error(error, "test context")
+        assert exc_info.value.action_required is False
+
+    def test_404_raises_video_error(self):
+        error = _make_http_error(404, reason="notFound")
+        with pytest.raises(VideoError):
             _handle_http_error(error, "test context")
 
-    def test_403_non_quota_raises_youtube_api_error(self):
+    def test_403_non_quota_raises_video_error(self):
         error = _make_http_error(403, reason="forbidden")
-        with pytest.raises(YouTubeAPIError):
+        with pytest.raises(VideoError):
             _handle_http_error(error, "test context")
 
 
@@ -214,7 +220,7 @@ class TestMoveVideoToPlaylist:
         mock_remove.assert_called_once_with(mock_service, "pli_found")
 
     @patch("youtube.get_playlist_videos", return_value=[])
-    def test_video_not_in_source_raises(self, mock_get_videos):
+    def test_video_not_in_source_raises_video_error(self, mock_get_videos):
         mock_service = MagicMock()
-        with pytest.raises(InvalidVideoError):
+        with pytest.raises(VideoError):
             move_video_to_playlist(mock_service, "vid_missing", "PL_src", "PL_dst")

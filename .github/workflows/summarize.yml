@@ -2,7 +2,7 @@ name: Summarize Videos
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # Every 15 minutes
+    - cron: '*/15 * * * *'  # Every 15 minutes (GitHub may throttle to ~hourly)
   workflow_dispatch:  # Manual trigger for testing
 
 jobs:

@@ -1,4 +1,4 @@
-"""Tests for src/notion_db.py — _truncate_text, get_processed_video_ids, create pages."""
+"""Tests for src/notion_db.py — _truncate_text, get_processed_video_ids, create pages, retry tracking."""
 
 import sys
 import os
@@ -8,7 +8,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from notion_db import _truncate_text, get_processed_video_ids, create_summary_page, create_error_page
+from notion_db import (
+    _truncate_text, get_processed_video_ids, create_summary_page,
+    increment_retry_count, mark_video_skipped,
+)
+from exceptions import APIError
 
 
 # ---------------------------------------------------------------------------
@@ -69,9 +73,25 @@ class TestGetProcessedVideoIds:
         result = get_processed_video_ids(mock_client, "db_123")
         assert result == {"vid_001", "vid_002"}
 
+    def test_filter_includes_summarized_and_skipped(self):
+        mock_client = MagicMock()
+        mock_client.databases.query.return_value = {
+            "results": [],
+            "has_more": False,
+            "next_cursor": None,
+        }
+
+        get_processed_video_ids(mock_client, "db_123")
+
+        call_kwargs = mock_client.databases.query.call_args[1]
+        filter_config = call_kwargs["filter"]
+        assert "or" in filter_config
+        statuses = [f["select"]["equals"] for f in filter_config["or"]]
+        assert "Summarized" in statuses
+        assert "Skipped" in statuses
+
     def test_handles_pagination(self):
         mock_client = MagicMock()
-        # First page
         page1 = {
             "results": [
                 {"properties": {"Video ID": {"rich_text": [{"text": {"content": "vid_001"}}]}}}
@@ -79,7 +99,6 @@ class TestGetProcessedVideoIds:
             "has_more": True,
             "next_cursor": "cursor_abc",
         }
-        # Second page
         page2 = {
             "results": [
                 {"properties": {"Video ID": {"rich_text": [{"text": {"content": "vid_002"}}]}}}
@@ -134,7 +153,7 @@ class TestCreateSummaryPage:
             "url": "https://youtube.com/watch?v=vid_001",
             "channel": "TestChan",
             "summary": "A great summary.",
-            "key_points": "• Point 1\n• Point 2",
+            "key_points": "\u2022 Point 1\n\u2022 Point 2",
             "duration": "10:30",
         }
 
@@ -166,38 +185,89 @@ class TestCreateSummaryPage:
 
 
 # ---------------------------------------------------------------------------
-# create_error_page — mocked Notion client
+# increment_retry_count — mocked Notion client
 # ---------------------------------------------------------------------------
 
-class TestCreateErrorPage:
-    def test_returns_page_id(self):
-        mock_client = MagicMock()
-        mock_client.pages.create.return_value = {"id": "err_page_1"}
-
-        video_data = {
-            "video_id": "vid_002",
-            "title": "Broken Video",
-            "url": "https://youtube.com/watch?v=vid_002",
-            "channel": "Chan",
+class TestIncrementRetryCount:
+    def _make_video_data(self):
+        return {
+            "video_id": "vid_001",
+            "title": "Test Video",
+            "url": "https://youtube.com/watch?v=vid_001",
+            "channel": "TestChan",
+            "duration": "5:00",
         }
 
-        result = create_error_page(mock_client, "db_123", video_data, "No transcript")
-        assert result == "err_page_1"
-
-    def test_error_status_and_message(self):
+    def test_creates_new_error_page_on_first_failure(self):
         mock_client = MagicMock()
-        mock_client.pages.create.return_value = {"id": "err_page_2"}
+        # No existing error page
+        mock_client.databases.query.return_value = {"results": []}
+        mock_client.pages.create.return_value = {"id": "new_page"}
 
-        video_data = {
-            "video_id": "vid_003",
-            "title": "Another Video",
-            "url": "https://youtube.com/watch?v=vid_003",
-            "channel": "Chan",
+        count = increment_retry_count(mock_client, "db_123", self._make_video_data(), "No transcript")
+        assert count == 1
+        mock_client.pages.create.assert_called_once()
+
+    def test_increments_existing_error_page(self):
+        mock_client = MagicMock()
+        existing_page = {
+            "id": "existing_page_id",
+            "properties": {
+                "Video ID": {"rich_text": [{"text": {"content": "vid_001"}}]},
+                "Retry Count": {"number": 1},
+                "Status": {"select": {"name": "Error"}},
+            }
         }
+        mock_client.databases.query.return_value = {"results": [existing_page]}
 
-        create_error_page(mock_client, "db_123", video_data, "API timeout")
+        count = increment_retry_count(mock_client, "db_123", self._make_video_data(), "Still failing")
+        assert count == 2
+        mock_client.pages.update.assert_called_once()
+        update_kwargs = mock_client.pages.update.call_args[1]
+        assert update_kwargs["properties"]["Retry Count"]["number"] == 2
 
-        call_kwargs = mock_client.pages.create.call_args[1]
-        props = call_kwargs["properties"]
-        assert props["Status"]["select"]["name"] == "Error"
-        assert "API timeout" in props["Summary"]["rich_text"][0]["text"]["content"]
+    def test_handles_none_retry_count_as_zero(self):
+        mock_client = MagicMock()
+        existing_page = {
+            "id": "existing_page_id",
+            "properties": {
+                "Video ID": {"rich_text": [{"text": {"content": "vid_001"}}]},
+                "Retry Count": {"number": None},
+                "Status": {"select": {"name": "Error"}},
+            }
+        }
+        mock_client.databases.query.return_value = {"results": [existing_page]}
+
+        count = increment_retry_count(mock_client, "db_123", self._make_video_data(), "Error")
+        assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# mark_video_skipped — mocked Notion client
+# ---------------------------------------------------------------------------
+
+class TestMarkVideoSkipped:
+    def test_updates_status_to_skipped(self):
+        mock_client = MagicMock()
+        existing_page = {
+            "id": "page_to_skip",
+            "properties": {
+                "Video ID": {"rich_text": [{"text": {"content": "vid_001"}}]},
+                "Status": {"select": {"name": "Error"}},
+            }
+        }
+        mock_client.databases.query.return_value = {"results": [existing_page]}
+
+        mark_video_skipped(mock_client, "db_123", "vid_001")
+
+        mock_client.pages.update.assert_called_once()
+        update_kwargs = mock_client.pages.update.call_args[1]
+        assert update_kwargs["properties"]["Status"]["select"]["name"] == "Skipped"
+
+    def test_no_error_page_found_logs_warning(self):
+        mock_client = MagicMock()
+        mock_client.databases.query.return_value = {"results": []}
+
+        # Should not raise
+        mark_video_skipped(mock_client, "db_123", "vid_missing")
+        mock_client.pages.update.assert_not_called()

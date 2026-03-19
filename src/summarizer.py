@@ -7,19 +7,17 @@ using the Gemini 3 Flash model via the OpenRouter API.
 
 import os
 import re
-import time
-from typing import Optional
 
 import openai
 from openai import OpenAI
+
+from exceptions import VideoError, APIError
 
 
 # Constants
 MODEL_ID = "google/gemini-3-flash-preview"
 MAX_TOKENS = 1024
 MAX_TRANSCRIPT_LENGTH = 500_000  # Gemini has 1M token context, can handle much more
-MAX_RETRIES = 3
-INITIAL_BACKOFF_SECONDS = 1.0
 
 
 def get_openrouter_client() -> OpenAI:
@@ -30,13 +28,16 @@ def get_openrouter_client() -> OpenAI:
         OpenAI: Configured OpenAI client pointing at OpenRouter.
 
     Raises:
-        ValueError: If OPENROUTER_API_KEY environment variable is not set.
+        APIError: If OPENROUTER_API_KEY environment variable is not set.
     """
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        raise ValueError(
-            "OPENROUTER_API_KEY environment variable is not set. "
-            "Please set it with your OpenRouter API key."
+        raise APIError(
+            "OPENROUTER_API_KEY not set",
+            service="OpenRouter",
+            action_required=True,
+            user_message="OpenRouter API Key Missing — Pipeline paused. Add the OPENROUTER_API_KEY secret in GitHub repository settings.",
+            initial_backoff_minutes=1440,
         )
     return OpenAI(
         base_url="https://openrouter.ai/api/v1",
@@ -124,30 +125,17 @@ def summarize_transcript(
     """
     Summarize a YouTube video transcript using Gemini 3 Flash via OpenRouter.
 
-    This function sends the transcript to Gemini 3 Flash for summarization
-    and returns a structured dict with the summary, key points, and
-    target audience information.
-
     Args:
         title: The title of the YouTube video.
         channel: The name of the YouTube channel.
         transcript: The full transcript text of the video.
 
     Returns:
-        dict: A dictionary containing:
-            - summary (str): A 2-3 sentence summary of the video.
-            - key_points (list[str]): 3-5 key takeaways as bullet points.
-            - target_audience (str): Description of who would find this useful.
-            - error (str, optional): Error message if summarization failed.
+        dict with 'summary', 'key_points', and 'target_audience' keys.
 
-    Example:
-        >>> result = summarize_transcript(
-        ...     title="Python Tips and Tricks",
-        ...     channel="Tech Channel",
-        ...     transcript="Today we're going to cover..."
-        ... )
-        >>> print(result["summary"])
-        "This video covers essential Python tips..."
+    Raises:
+        VideoError: If the LLM response can't be parsed for this specific video.
+        APIError: If there's an account-level issue (auth, credits, rate limit).
     """
     # Truncate transcript if needed
     transcript = _truncate_transcript(transcript)
@@ -178,67 +166,82 @@ TARGET AUDIENCE:
 
     system_prompt = "You summarize YouTube video transcripts concisely."
 
-    # Implement retry with exponential backoff for rate limits
-    last_error: Optional[Exception] = None
-    backoff = INITIAL_BACKOFF_SECONDS
+    try:
+        client = get_openrouter_client()
 
-    for attempt in range(MAX_RETRIES):
-        try:
-            client = get_openrouter_client()
+        response = client.chat.completions.create(
+            model=MODEL_ID,
+            max_tokens=MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
 
-            response = client.chat.completions.create(
-                model=MODEL_ID,
-                max_tokens=MAX_TOKENS,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+        # Extract text from response
+        response_text = response.choices[0].message.content
+
+        # Parse and return the structured response
+        result = _parse_response(response_text)
+
+        # Check for empty/unparseable response
+        if not result["summary"]:
+            raise VideoError(
+                f"LLM returned unparseable response for '{title}'",
             )
 
-            # Extract text from response
-            response_text = response.choices[0].message.content
+        return result
 
-            # Parse and return the structured response
-            return _parse_response(response_text)
+    except (VideoError, APIError):
+        raise  # Don't catch our own exceptions
 
-        except openai.RateLimitError as e:
-            last_error = e
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(backoff)
-                backoff *= 2  # Exponential backoff
-            continue
+    except openai.AuthenticationError as e:
+        status = getattr(e, "status_code", None)
+        if status == 402:
+            raise APIError(
+                f"OpenRouter payment required: {e}",
+                service="OpenRouter",
+                action_required=True,
+                user_message="OpenRouter API Out of Credits — Pipeline paused. Top up your OpenRouter balance to resume. No videos were affected.",
+                initial_backoff_minutes=1440,
+            )
+        raise APIError(
+            f"OpenRouter authentication failed: {e}",
+            service="OpenRouter",
+            action_required=True,
+            user_message="OpenRouter API Key Invalid — Pipeline paused. The OPENROUTER_API_KEY secret in GitHub needs to be updated.",
+            initial_backoff_minutes=1440,
+        )
 
-        except openai.APIError as e:
-            # Return error dict for API errors
-            return {
-                "summary": "",
-                "key_points": [],
-                "target_audience": "",
-                "error": f"OpenRouter API error: {str(e)}"
-            }
+    except openai.RateLimitError as e:
+        status = getattr(e, "status_code", None)
+        if status == 402:
+            raise APIError(
+                f"OpenRouter payment required: {e}",
+                service="OpenRouter",
+                action_required=True,
+                user_message="OpenRouter API Out of Credits — Pipeline paused. Top up your OpenRouter balance to resume. No videos were affected.",
+                initial_backoff_minutes=1440,
+            )
+        raise APIError(
+            f"OpenRouter rate limit: {e}",
+            service="OpenRouter",
+            action_required=False,
+            user_message="OpenRouter Rate Limit Hit — Pipeline paused. Will retry automatically on next scheduled run.",
+            initial_backoff_minutes=120,
+        )
 
-        except ValueError as e:
-            # Handle missing API key
-            return {
-                "summary": "",
-                "key_points": [],
-                "target_audience": "",
-                "error": str(e)
-            }
+    except openai.APIError as e:
+        status = getattr(e, "status_code", None)
+        if status and status >= 500:
+            raise APIError(
+                f"OpenRouter server error: {e}",
+                service="OpenRouter",
+                action_required=False,
+                user_message=f"OpenRouter API Temporarily Down (HTTP {status}) — Pipeline paused. Will retry automatically on next scheduled run.",
+                initial_backoff_minutes=30,
+            )
+        raise VideoError(f"OpenRouter API error: {e}")
 
-        except Exception as e:
-            # Catch any other unexpected errors
-            return {
-                "summary": "",
-                "key_points": [],
-                "target_audience": "",
-                "error": f"Unexpected error: {str(e)}"
-            }
-
-    # If we exhausted retries due to rate limits
-    return {
-        "summary": "",
-        "key_points": [],
-        "target_audience": "",
-        "error": f"Rate limit exceeded after {MAX_RETRIES} retries: {str(last_error)}"
-    }
+    except Exception as e:
+        raise VideoError(f"Unexpected summarization error: {e}")

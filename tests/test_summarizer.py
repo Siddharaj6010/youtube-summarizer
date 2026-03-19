@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from summarizer import _truncate_transcript, _parse_response, summarize_transcript, MAX_TRANSCRIPT_LENGTH
+from exceptions import VideoError, APIError
 
 
 # ---------------------------------------------------------------------------
@@ -21,20 +22,16 @@ class TestTruncateTranscript:
         assert _truncate_transcript(text) == text
 
     def test_long_text_truncated_at_sentence_boundary(self):
-        # Build text that exceeds the limit, with a sentence boundary near the end
         sentence = "This is a complete sentence. "
-        # Fill up to ~90% of limit with sentences, then add more
         repeats = (MAX_TRANSCRIPT_LENGTH // len(sentence)) + 10
         text = sentence * repeats
         result = _truncate_transcript(text)
-        assert len(result) <= MAX_TRANSCRIPT_LENGTH + 100  # some slack for the suffix
+        assert len(result) <= MAX_TRANSCRIPT_LENGTH + 100
         assert result.endswith("[Transcript truncated due to length...]")
-        # Should end at a sentence boundary (period before the suffix)
         before_suffix = result.replace("\n\n[Transcript truncated due to length...]", "")
         assert before_suffix.endswith(".")
 
     def test_long_text_no_sentence_boundary_truncated_at_limit(self):
-        # A single long word with no periods
         text = "x" * (MAX_TRANSCRIPT_LENGTH + 1000)
         result = _truncate_transcript(text)
         assert result.endswith("[Transcript truncated due to length...]")
@@ -80,7 +77,7 @@ A video about testing.
 KEY POINTS:
 - First point
 * Second point
-• Third point
+\u2022 Third point
 
 TARGET AUDIENCE:
 Developers"""
@@ -121,13 +118,11 @@ Developers"""
         mock_get_client.return_value = mock_client
 
         result = summarize_transcript("Python Tips", "TechChan", "some transcript")
-        assert "error" not in result
         assert "Python" in result["summary"]
         assert len(result["key_points"]) == 2
 
-    @patch("summarizer.time.sleep")  # Don't actually sleep in tests
     @patch("summarizer.get_openrouter_client")
-    def test_rate_limit_retries_then_fails(self, mock_get_client, mock_sleep):
+    def test_rate_limit_raises_api_error(self, mock_get_client):
         import openai
 
         mock_client = MagicMock()
@@ -142,14 +137,14 @@ Developers"""
         )
         mock_get_client.return_value = mock_client
 
-        result = summarize_transcript("Title", "Channel", "transcript")
-        assert "error" in result
-        assert "rate limit" in result["error"].lower() or "Rate limit" in result["error"]
-        # Should have been called MAX_RETRIES times
-        assert mock_client.chat.completions.create.call_count == 3
+        with pytest.raises(APIError) as exc_info:
+            summarize_transcript("Title", "Channel", "transcript")
+        assert exc_info.value.service == "OpenRouter"
+        # Single call, no retries
+        assert mock_client.chat.completions.create.call_count == 1
 
     @patch("summarizer.get_openrouter_client")
-    def test_api_error_returns_error_dict(self, mock_get_client):
+    def test_server_error_raises_api_error(self, mock_get_client):
         import openai
 
         mock_client = MagicMock()
@@ -157,18 +152,83 @@ Developers"""
         mock_resp.status_code = 500
         mock_resp.headers = {}
         mock_resp.json.return_value = {}
-        mock_client.chat.completions.create.side_effect = openai.APIError(
+        error = openai.APIError(
             message="server error",
             request=MagicMock(),
             body=None,
         )
+        error.status_code = 500
+        mock_client.chat.completions.create.side_effect = error
         mock_get_client.return_value = mock_client
 
-        result = summarize_transcript("Title", "Channel", "transcript")
-        assert "error" in result
-        assert "API error" in result["error"] or "server error" in result["error"]
+        with pytest.raises(APIError) as exc_info:
+            summarize_transcript("Title", "Channel", "transcript")
+        assert exc_info.value.action_required is False
 
-    @patch("summarizer.get_openrouter_client", side_effect=ValueError("OPENROUTER_API_KEY not set"))
-    def test_missing_api_key(self, mock_get_client):
-        result = summarize_transcript("Title", "Channel", "transcript")
-        assert "error" in result
+    @patch("summarizer.get_openrouter_client")
+    def test_auth_error_raises_api_error(self, mock_get_client):
+        import openai
+
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.headers = {}
+        mock_resp.json.return_value = {}
+        mock_client.chat.completions.create.side_effect = openai.AuthenticationError(
+            message="invalid key",
+            response=mock_resp,
+            body=None,
+        )
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(APIError) as exc_info:
+            summarize_transcript("Title", "Channel", "transcript")
+        assert exc_info.value.action_required is True
+        assert exc_info.value.service == "OpenRouter"
+
+    @patch("summarizer.get_openrouter_client")
+    def test_payment_required_raises_api_error(self, mock_get_client):
+        import openai
+
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 402
+        mock_resp.headers = {}
+        mock_resp.json.return_value = {}
+        error = openai.AuthenticationError(
+            message="insufficient credits",
+            response=mock_resp,
+            body=None,
+        )
+        error.status_code = 402
+        mock_client.chat.completions.create.side_effect = error
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(APIError) as exc_info:
+            summarize_transcript("Title", "Channel", "transcript")
+        assert exc_info.value.action_required is True
+        assert "credit" in exc_info.value.user_message.lower()
+
+    def test_missing_api_key_raises_api_error(self, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+        with pytest.raises(APIError) as exc_info:
+            summarize_transcript("Title", "Channel", "transcript")
+        assert exc_info.value.service == "OpenRouter"
+        assert exc_info.value.action_required is True
+
+    @patch("summarizer.get_openrouter_client")
+    def test_unparseable_response_raises_video_error(self, mock_get_client):
+        mock_choice = MagicMock()
+        mock_choice.message.content = "Just some random text with no structure"
+
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(VideoError) as exc_info:
+            summarize_transcript("Title", "Channel", "transcript")
+        assert "unparseable" in str(exc_info.value).lower()

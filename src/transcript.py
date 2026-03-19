@@ -10,6 +10,8 @@ import logging
 import os
 import requests
 
+from exceptions import VideoError, APIError
+
 logger = logging.getLogger(__name__)
 
 SUPADATA_API_URL = "https://api.supadata.ai/v1/youtube/transcript"
@@ -20,7 +22,7 @@ def _get_api_key() -> str | None:
     return os.environ.get("SUPADATA_API_KEY")
 
 
-def get_transcript(video_id: str) -> str | None:
+def get_transcript(video_id: str) -> str:
     """
     Fetch the transcript for a YouTube video as plain text.
 
@@ -31,18 +33,21 @@ def get_transcript(video_id: str) -> str | None:
         video_id: The YouTube video ID (e.g., 'dQw4w9WgXcQ')
 
     Returns:
-        The transcript as a single string,
-        or None if no transcript is available.
+        The transcript as a single string.
 
-    Example:
-        >>> transcript = get_transcript('dQw4w9WgXcQ')
-        >>> if transcript:
-        ...     print(transcript[:100])
+    Raises:
+        VideoError: If the specific video has no transcript available.
+        APIError: If there's an account-level issue (auth, quota, server down).
     """
     api_key = _get_api_key()
     if not api_key:
-        logger.error("SUPADATA_API_KEY environment variable not set")
-        return None
+        raise APIError(
+            "SUPADATA_API_KEY not set",
+            service="Supadata",
+            action_required=True,
+            user_message="SUPADATA_API_KEY is missing — Pipeline paused. Add the SUPADATA_API_KEY secret in GitHub repository settings.",
+            initial_backoff_minutes=1440,
+        )
 
     try:
         response = requests.get(
@@ -79,39 +84,81 @@ def get_transcript(video_id: str) -> str | None:
                     logger.info(f"Successfully fetched transcript for video {video_id}")
                     return " ".join(text_parts)
 
-            logger.warning(f"No transcript content in response for video {video_id}")
-            return None
+            raise VideoError(
+                f"Transcript response was empty for video {video_id}",
+                video_id=video_id,
+            )
 
         elif response.status_code == 404:
-            logger.info(f"No transcript available for video {video_id}")
-            return None
+            raise VideoError(
+                f"No captions/transcript available for video {video_id}",
+                video_id=video_id,
+            )
 
         elif response.status_code == 400:
             error_data = response.json() if response.text else {}
             error_msg = error_data.get("error", "Bad request")
-            logger.warning(f"Bad request for video {video_id}: {error_msg}")
-            return None
+            raise VideoError(
+                f"Bad request for video {video_id}: {error_msg}",
+                video_id=video_id,
+            )
 
         elif response.status_code == 401:
-            logger.error("Invalid Supadata API key")
-            return None
+            raise APIError(
+                "Invalid Supadata API key",
+                service="Supadata",
+                action_required=True,
+                user_message="Supadata API Key Invalid — Pipeline paused. The SUPADATA_API_KEY secret in GitHub needs to be updated.",
+                initial_backoff_minutes=1440,
+            )
 
         elif response.status_code == 429:
-            logger.error("Supadata API rate limit exceeded")
-            return None
+            raise APIError(
+                "Supadata rate limit / quota exceeded",
+                service="Supadata",
+                action_required=False,
+                user_message="Supadata Monthly Limit Reached — Pipeline paused. The monthly transcript requests have been used up. No action needed — this will auto-resolve when the new month starts.",
+                initial_backoff_minutes=1440,
+            )
+
+        elif response.status_code >= 500:
+            raise APIError(
+                f"Supadata server error: {response.status_code}",
+                service="Supadata",
+                action_required=False,
+                user_message=f"Supadata API Temporarily Down (HTTP {response.status_code}) — Pipeline paused. Will retry automatically on next scheduled run.",
+                initial_backoff_minutes=30,
+            )
 
         else:
-            logger.error(f"Supadata API error {response.status_code}: {response.text}")
-            return None
+            raise VideoError(
+                f"Supadata API error {response.status_code} for video {video_id}: {response.text}",
+                video_id=video_id,
+            )
+
+    except (VideoError, APIError):
+        raise  # Don't catch our own exceptions
 
     except requests.exceptions.Timeout:
-        logger.error(f"Timeout fetching transcript for video {video_id}")
-        return None
+        raise APIError(
+            f"Timeout fetching transcript for video {video_id}",
+            service="Supadata",
+            action_required=False,
+            user_message="Supadata API Timeout — Pipeline paused. The API is not responding. Will retry automatically on next scheduled run.",
+            initial_backoff_minutes=30,
+        )
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"Request error fetching transcript for {video_id}: {e}")
-        return None
+        raise APIError(
+            f"Network error fetching transcript: {e}",
+            service="Supadata",
+            action_required=False,
+            user_message="Supadata Connection Error — Pipeline paused. Could not connect to the Supadata API. Will retry automatically on next scheduled run.",
+            initial_backoff_minutes=30,
+        )
 
     except Exception as e:
-        logger.error(f"Unexpected error fetching transcript for {video_id}: {e}")
-        return None
+        raise VideoError(
+            f"Unexpected error fetching transcript for {video_id}: {e}",
+            video_id=video_id,
+        )

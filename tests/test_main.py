@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from main import format_duration, process_video
+from exceptions import VideoError, APIError
 
 
 # ---------------------------------------------------------------------------
@@ -75,59 +76,53 @@ class TestProcessVideo:
         mock_notion.assert_called_once()
         mock_slack.assert_called_once()
 
-    @patch("main.send_processing_error_notification", return_value=True)
-    @patch("main.create_error_page", return_value="err_page_1")
-    @patch("main.get_transcript", return_value=None)
+    @patch("main.get_transcript")
     @patch("main.get_video_details", return_value={"duration": "PT5M"})
-    def test_no_transcript_creates_error_page_and_returns_false(
-        self, mock_details, mock_transcript, mock_error_page, mock_slack,
-    ):
-        result = process_video(MagicMock(), MagicMock(), self._make_video(), "db_id")
-        assert result is False  # Video should NOT be moved
-        mock_error_page.assert_called_once()
-        mock_slack.assert_called_once()
-        # Verify error message mentions transcript
-        call_args = mock_error_page.call_args
-        assert "transcript" in call_args[0][3].lower() or "transcript" in str(call_args).lower()
+    def test_no_transcript_raises_video_error(self, mock_details, mock_transcript):
+        mock_transcript.side_effect = VideoError("No captions available", video_id="vid123")
 
-    @patch("main.send_processing_error_notification", return_value=True)
-    @patch("main.create_error_page", return_value="err_page_2")
-    @patch("main.summarize_transcript", return_value={
-        "summary": "",
-        "key_points": [],
-        "target_audience": "",
-        "error": "Anthropic API error: something broke",
-    })
+        with pytest.raises(VideoError):
+            process_video(MagicMock(), MagicMock(), self._make_video(), "db_id")
+
     @patch("main.get_transcript", return_value="some transcript text")
+    @patch("main.summarize_transcript")
     @patch("main.get_video_details", return_value={"duration": "PT3M"})
-    def test_summarizer_failure_creates_error_page_and_returns_false(
-        self, mock_details, mock_transcript, mock_summarize, mock_error_page, mock_slack,
+    def test_summarizer_api_error_propagates(
+        self, mock_details, mock_summarize, mock_transcript,
     ):
-        result = process_video(MagicMock(), MagicMock(), self._make_video(), "db_id")
-        assert result is False  # Video should NOT be moved
-        mock_error_page.assert_called_once()
-        mock_slack.assert_called_once()
+        mock_summarize.side_effect = APIError(
+            "Out of credits", service="OpenRouter",
+            action_required=True, user_message="Top up",
+        )
 
-    @patch("main.send_processing_error_notification", return_value=True)
-    @patch("main.create_error_page", side_effect=Exception("Notion down"))
-    @patch("main.get_transcript", return_value=None)
-    @patch("main.get_video_details", return_value={"duration": "PT5M"})
-    def test_notion_error_page_failure_returns_false(
-        self, mock_details, mock_transcript, mock_error_page, mock_slack,
-    ):
-        result = process_video(MagicMock(), MagicMock(), self._make_video(), "db_id")
-        assert result is False
+        with pytest.raises(APIError):
+            process_video(MagicMock(), MagicMock(), self._make_video(), "db_id")
 
-    @patch("main.send_processing_error_notification", return_value=True)
-    @patch("main.get_video_details", side_effect=Exception("API error"))
-    @patch("main.get_transcript", return_value=None)
-    @patch("main.create_error_page", return_value="err_page")
+    @patch("main.get_video_details")
+    @patch("main.get_transcript", return_value="transcript text")
+    @patch("main.summarize_transcript", return_value={
+        "summary": "Good video.",
+        "key_points": ["p1"],
+        "target_audience": "devs",
+    })
+    @patch("main.create_summary_page", return_value="page_abc")
+    @patch("main.send_summary_notification", return_value=True)
     def test_video_details_failure_uses_unknown_duration(
-        self, mock_error_page, mock_transcript, mock_details, mock_slack,
+        self, mock_slack, mock_notion, mock_summarize, mock_transcript, mock_details,
     ):
+        mock_details.side_effect = VideoError("Video not found", video_id="vid123")
+
         result = process_video(MagicMock(), MagicMock(), self._make_video(), "db_id")
-        assert result is False
-        # Check that duration was set to "Unknown" in video_data
-        call_args = mock_error_page.call_args
-        video_data = call_args[0][2]
-        assert video_data["duration"] == "Unknown"
+        assert result is True
+
+    @patch("main.get_transcript")
+    @patch("main.get_video_details", return_value={"duration": "PT5M"})
+    def test_transcript_api_error_propagates(self, mock_details, mock_transcript):
+        mock_transcript.side_effect = APIError(
+            "Supadata down", service="Supadata",
+            action_required=False, user_message="Will retry",
+        )
+
+        with pytest.raises(APIError) as exc_info:
+            process_video(MagicMock(), MagicMock(), self._make_video(), "db_id")
+        assert exc_info.value.service == "Supadata"

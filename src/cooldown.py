@@ -1,12 +1,13 @@
 """
-Cooldown manager for handling repeated failures with exponential backoff.
+Cooldown manager for API-level errors.
 
-Persists state to a JSON file (cached between GitHub Actions runs) to prevent:
-1. Spamming Slack with repeated error notifications
-2. Wasting API calls when a persistent error (e.g., expired token) is present
-3. Unnecessary workflow runs during known outages
+Only used for Bucket 2 (account/service-level) errors, NOT for video-level errors.
+Persists state to a JSON file cached between GitHub Actions runs.
 
-Backoff schedule: 15min -> 30min -> 2hrs -> 8hrs -> 24hrs (capped)
+Backoff progression: initial (error-specific) -> 3hr -> 24hr -> 3 days (cap)
+The initial backoff is set by the error type (e.g., 30min for 5xx, 24hr for quota).
+
+Sends one Slack notification on first occurrence, then silences until recovery.
 """
 
 import json
@@ -16,9 +17,9 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
-# Backoff intervals in minutes for each consecutive failure
-# After the last entry, the schedule stays at the final value (24 hours)
-BACKOFF_MINUTES = [15, 30, 120, 480, 1440]
+# Backoff steps after the initial (error-specific) step.
+# Progression: initial -> 3hr -> 24hr -> 3 days (cap)
+BACKOFF_STEPS_MINUTES = [180, 1440, 4320]
 
 # Default path for cooldown state file (overridable via env var)
 DEFAULT_STATE_PATH = "/tmp/cooldown_state.json"
@@ -29,11 +30,7 @@ def _get_state_path() -> str:
 
 
 def load_state() -> dict | None:
-    """Load cooldown state from the JSON file.
-
-    Returns:
-        State dict if file exists and is valid, None otherwise.
-    """
+    """Load cooldown state from the JSON file."""
     path = _get_state_path()
     if not os.path.exists(path):
         return None
@@ -41,7 +38,6 @@ def load_state() -> dict | None:
     try:
         with open(path, "r") as f:
             state = json.load(f)
-        # Validate required fields
         if "consecutive_failures" not in state:
             return None
         return state
@@ -60,27 +56,33 @@ def save_state(state: dict) -> None:
         logger.error(f"Could not write cooldown state: {e}")
 
 
-def get_backoff_minutes(consecutive_failures: int) -> int:
-    """Get the backoff interval in minutes for the given failure count.
+def get_backoff_minutes(consecutive_failures: int, initial_backoff: int) -> int:
+    """Get the backoff interval for the given failure count.
+
+    Progression: initial -> 3hr -> 24hr -> 3 days (cap)
 
     Args:
-        consecutive_failures: Number of consecutive failures so far.
+        consecutive_failures: Number of consecutive failures (1-based).
+        initial_backoff: The first step's backoff in minutes (error-specific).
 
     Returns:
         Minutes to wait before next retry.
     """
     if consecutive_failures <= 0:
         return 0
-    index = min(consecutive_failures - 1, len(BACKOFF_MINUTES) - 1)
-    return BACKOFF_MINUTES[index]
+    if consecutive_failures == 1:
+        return initial_backoff
+
+    # Steps after the first: index into BACKOFF_STEPS_MINUTES
+    step_index = min(consecutive_failures - 2, len(BACKOFF_STEPS_MINUTES) - 1)
+    return BACKOFF_STEPS_MINUTES[step_index]
 
 
 def should_skip_run() -> tuple[bool, dict | None]:
     """Check if the current run should be skipped due to active cooldown.
 
     Returns:
-        Tuple of (should_skip, state). If should_skip is True, the run
-        should exit early. State is the current cooldown state (or None).
+        Tuple of (should_skip, state).
     """
     state = load_state()
     if state is None or state.get("consecutive_failures", 0) == 0:
@@ -91,7 +93,11 @@ def should_skip_run() -> tuple[bool, dict | None]:
         return False, state
 
     now = datetime.now(timezone.utc)
-    retry_time = datetime.fromisoformat(next_retry)
+    try:
+        retry_time = datetime.fromisoformat(next_retry)
+    except ValueError:
+        logger.warning(f"Invalid next_retry_after timestamp: {next_retry}")
+        return False, state
 
     if now < retry_time:
         wait_remaining = retry_time - now
@@ -109,27 +115,29 @@ def should_skip_run() -> tuple[bool, dict | None]:
     return False, state
 
 
-def record_failure(error_message: str) -> dict:
-    """Record a failure and update the cooldown schedule.
+def record_failure(error_message: str, initial_backoff_minutes: int) -> dict:
+    """Record an API-level failure and set the cooldown.
 
     Args:
-        error_message: Description of the error that occurred.
+        error_message: Description of the error.
+        initial_backoff_minutes: First-step backoff (from APIError).
 
     Returns:
-        Updated state dict with new backoff timing.
+        Updated state dict.
     """
     state = load_state() or {"consecutive_failures": 0}
     failures = state.get("consecutive_failures", 0) + 1
-    backoff = get_backoff_minutes(failures)
+    backoff = get_backoff_minutes(failures, initial_backoff_minutes)
     now = datetime.now(timezone.utc)
     next_retry = now + timedelta(minutes=backoff)
 
     state.update({
         "consecutive_failures": failures,
         "last_failure_time": now.isoformat(),
-        "last_error": error_message[:500],  # Truncate long errors
+        "last_error": error_message[:500],
         "next_retry_after": next_retry.isoformat(),
         "backoff_minutes": backoff,
+        "initial_backoff_minutes": initial_backoff_minutes,
     })
 
     save_state(state)
@@ -144,13 +152,11 @@ def record_success() -> dict | None:
     """Clear cooldown state after a successful run.
 
     Returns:
-        Previous state if there was an active cooldown (for recovery
-        notification), None if there was no prior cooldown.
+        Previous state if there was an active cooldown, None otherwise.
     """
     state = load_state()
     previous_failures = state.get("consecutive_failures", 0) if state else 0
 
-    # Always write a clean state
     clean_state = {"consecutive_failures": 0}
     save_state(clean_state)
 
@@ -159,6 +165,6 @@ def record_success() -> dict | None:
             f"Recovered after {previous_failures} consecutive failures! "
             f"Cooldown cleared."
         )
-        return state  # Return old state for recovery notification
+        return state
 
     return None
