@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from notion_db import (
     _truncate_text, get_processed_video_ids, create_summary_page,
-    increment_retry_count, mark_video_skipped,
+    increment_retry_count, mark_video_skipped, MAX_RETRIES,
 )
 from exceptions import APIError
 
@@ -226,6 +226,23 @@ class TestIncrementRetryCount:
         update_kwargs = mock_client.pages.update.call_args[1]
         assert update_kwargs["properties"]["Retry Count"]["number"] == 2
 
+    def test_returns_max_retries_on_unexpected_error(self):
+        mock_client = MagicMock()
+        mock_client.databases.query.side_effect = RuntimeError("connection lost")
+
+        count = increment_retry_count(mock_client, "db_123", self._make_video_data(), "Error")
+        assert count == MAX_RETRIES
+
+    def test_propagates_api_error(self):
+        mock_client = MagicMock()
+        mock_client.databases.query.side_effect = APIError(
+            "Notion unauthorized", service="Notion", action_required=True,
+            user_message="test", initial_backoff_minutes=1440,
+        )
+
+        with pytest.raises(APIError):
+            increment_retry_count(mock_client, "db_123", self._make_video_data(), "Error")
+
     def test_handles_none_retry_count_as_zero(self):
         mock_client = MagicMock()
         existing_page = {
@@ -263,6 +280,16 @@ class TestMarkVideoSkipped:
         mock_client.pages.update.assert_called_once()
         update_kwargs = mock_client.pages.update.call_args[1]
         assert update_kwargs["properties"]["Status"]["select"]["name"] == "Skipped"
+
+    def test_propagates_api_error(self):
+        mock_client = MagicMock()
+        mock_client.databases.query.side_effect = APIError(
+            "Notion rate limit", service="Notion", action_required=False,
+            user_message="test", initial_backoff_minutes=120,
+        )
+
+        with pytest.raises(APIError):
+            mark_video_skipped(mock_client, "db_123", "vid_001")
 
     def test_no_error_page_found_logs_warning(self):
         mock_client = MagicMock()
