@@ -1,4 +1,4 @@
-"""Tests for src/notion_db.py — _truncate_text, get_processed_video_ids, create pages, retry tracking."""
+"""Tests for src/notion_db.py — _make_rich_text_blocks, get_processed_video_ids, create pages, retry tracking."""
 
 import sys
 import os
@@ -9,37 +9,49 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from notion_db import (
-    _truncate_text, get_processed_video_ids, create_summary_page,
+    _make_rich_text_blocks, NOTION_TEXT_BLOCK_LIMIT,
+    get_processed_video_ids, create_summary_page,
     increment_retry_count, mark_video_skipped, MAX_RETRIES,
 )
 from exceptions import APIError
 
 
 # ---------------------------------------------------------------------------
-# _truncate_text — pure logic
+# _make_rich_text_blocks — pure logic
 # ---------------------------------------------------------------------------
 
-class TestTruncateText:
-    def test_short_text_unchanged(self):
-        assert _truncate_text("hello", 100) == "hello"
+class TestMakeRichTextBlocks:
+    def test_short_text_single_block(self):
+        blocks = _make_rich_text_blocks("hello")
+        assert len(blocks) == 1
+        assert blocks[0]["text"]["content"] == "hello"
 
-    def test_long_text_truncated_with_ellipsis(self):
-        result = _truncate_text("a" * 50, 20)
-        assert len(result) == 20
-        assert result.endswith("...")
+    def test_long_text_splits_into_multiple_blocks(self):
+        text = "a" * 4500
+        blocks = _make_rich_text_blocks(text)
+        assert len(blocks) == 3
+        assert len(blocks[0]["text"]["content"]) == NOTION_TEXT_BLOCK_LIMIT
+        assert len(blocks[1]["text"]["content"]) == NOTION_TEXT_BLOCK_LIMIT
+        assert len(blocks[2]["text"]["content"]) == 500
+        # Reconstruct full text
+        reconstructed = "".join(b["text"]["content"] for b in blocks)
+        assert reconstructed == text
 
     def test_exactly_at_limit(self):
-        text = "a" * 100
-        assert _truncate_text(text, 100) == text
+        text = "a" * NOTION_TEXT_BLOCK_LIMIT
+        blocks = _make_rich_text_blocks(text)
+        assert len(blocks) == 1
+        assert blocks[0]["text"]["content"] == text
 
     def test_one_over_limit(self):
-        text = "a" * 101
-        result = _truncate_text(text, 100)
-        assert len(result) == 100
-        assert result.endswith("...")
+        text = "a" * (NOTION_TEXT_BLOCK_LIMIT + 1)
+        blocks = _make_rich_text_blocks(text)
+        assert len(blocks) == 2
 
     def test_empty_string(self):
-        assert _truncate_text("", 10) == ""
+        blocks = _make_rich_text_blocks("")
+        assert len(blocks) == 1
+        assert blocks[0]["text"]["content"] == ""
 
 
 # ---------------------------------------------------------------------------

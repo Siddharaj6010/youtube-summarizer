@@ -188,10 +188,10 @@ def create_summary_page(client: Client, database_id: str, video_data: dict) -> s
             "rich_text": [{"text": {"content": video_data.get("channel", "")}}]
         },
         "Summary": {
-            "rich_text": [{"text": {"content": _truncate_text(video_data.get("summary", ""), 2000)}}]
+            "rich_text": _make_rich_text_blocks(video_data.get("summary", ""))
         },
         "Key Points": {
-            "rich_text": [{"text": {"content": _truncate_text(video_data.get("key_points", ""), 2000)}}]
+            "rich_text": _make_rich_text_blocks(video_data.get("key_points", ""))
         },
         "Duration": {
             "rich_text": [{"text": {"content": video_data.get("duration", "")}}]
@@ -350,19 +350,28 @@ def mark_video_skipped(client: Client, database_id: str, video_id: str) -> None:
         logger.error(f"Failed to mark {video_id} as Skipped: {e}")
 
 
-def _truncate_text(text: str, max_length: int) -> str:
-    """
-    Truncate text to a maximum length, adding ellipsis if truncated.
+NOTION_TEXT_BLOCK_LIMIT = 2000
 
-    Notion rich_text properties have a 2000 character limit per text block.
+
+def _make_rich_text_blocks(text: str) -> list[dict]:
+    """
+    Split text into multiple Notion rich_text objects to avoid the 2000 char limit.
+
+    Notion rich_text properties accept an array of text objects, each up to 2000 chars.
+    Instead of truncating, we split the text across multiple blocks.
 
     Args:
-        text: The text to potentially truncate.
-        max_length: Maximum allowed length.
+        text: The text to split into blocks.
 
     Returns:
-        The original text if within limit, otherwise truncated with "..." suffix.
+        List of rich_text objects, each within the 2000 char limit.
     """
-    if len(text) <= max_length:
-        return text
-    return text[: max_length - 3] + "..."
+    if not text:
+        return [{"text": {"content": ""}}]
+
+    blocks = []
+    for i in range(0, len(text), NOTION_TEXT_BLOCK_LIMIT):
+        chunk = text[i:i + NOTION_TEXT_BLOCK_LIMIT]
+        blocks.append({"text": {"content": chunk}})
+
+    return blocks

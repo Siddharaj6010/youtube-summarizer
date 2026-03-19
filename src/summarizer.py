@@ -16,7 +16,7 @@ from exceptions import VideoError, APIError
 
 # Constants
 MODEL_ID = "google/gemini-3-flash-preview"
-MAX_TOKENS = 1024
+MAX_TOKENS = 4096
 MAX_TRANSCRIPT_LENGTH = 500_000  # Gemini has 1M token context, can handle much more
 
 
@@ -141,30 +141,30 @@ def summarize_transcript(
     transcript = _truncate_transcript(transcript)
 
     # Build the user prompt
-    user_prompt = f"""Summarize this video transcript.
+    user_prompt = f"""Summarize this YouTube video transcript thoroughly. Your goal is to capture ALL important information so the reader does not need to watch the video.
 
 Title: {title}
 Channel: {channel}
 Transcript: {transcript}
 
 Provide:
-1. A 2-3 sentence summary
-2. 3-5 key takeaways as bullet points
+1. A comprehensive summary that covers every major topic, argument, example, and conclusion discussed in the video. Include specific details like names, numbers, tools, techniques, and quotes when mentioned. Write in paragraph form and be thorough — the reader should feel they watched the video after reading this.
+2. All key points, insights, and actionable takeaways. Do NOT limit yourself to a small number — include every notable point from the video.
 3. Who would find this video useful
 
 Format your response as:
 SUMMARY:
-[your summary]
+[thorough summary covering all major topics discussed — multiple paragraphs are fine]
 
 KEY POINTS:
 - [point 1]
 - [point 2]
-...
+...(include as many points as needed to cover everything important)
 
 TARGET AUDIENCE:
 [who would benefit]"""
 
-    system_prompt = "You summarize YouTube video transcripts concisely."
+    system_prompt = "You create thorough, detailed YouTube video summaries that capture all important information so the reader doesn't need to watch the video. You include specific details, examples, names, and numbers rather than vague generalizations."
 
     try:
         client = get_openrouter_client()
