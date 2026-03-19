@@ -6,6 +6,10 @@ This script orchestrates the entire summarization pipeline:
 2. Filter out already-processed videos (tracked in Notion)
 3. For each new video: fetch transcript, summarize, save to Notion
 4. Move processed videos to the "Summarized" playlist
+
+Error handling uses a two-tier system:
+- VideoError: Problem with a specific video (retry up to 3 times, then skip)
+- APIError: Account/service-level problem (stop pipeline immediately)
 """
 
 import os
@@ -16,9 +20,13 @@ from dotenv import load_dotenv
 from youtube import get_youtube_service, get_playlist_videos, get_video_details, move_video_to_playlist
 from transcript import get_transcript
 from summarizer import summarize_transcript
-from notion_db import get_notion_client, get_processed_video_ids, create_summary_page, create_error_page
-from slack_notify import send_summary_notification, send_processing_error_notification, send_error_notification, send_recovery_notification
+from notion_db import (
+    get_notion_client, get_processed_video_ids, create_summary_page,
+    increment_retry_count, mark_video_skipped, MAX_RETRIES,
+)
+from slack_notify import send_summary_notification, send_video_skipped_notification, send_api_error_notification
 from cooldown import should_skip_run, record_failure, record_success
+from exceptions import VideoError, APIError
 
 # Configure logging
 logging.basicConfig(
@@ -64,131 +72,19 @@ def format_duration(duration_iso: str) -> str:
         return f"{minutes}:{seconds:02d}"
 
 
-def process_video(youtube_service, notion_client, video: dict, database_id: str) -> bool:
-    """Process a single video: fetch transcript, summarize, save to Notion.
-
-    Args:
-        youtube_service: Authenticated YouTube API service
-        notion_client: Authenticated Notion client
-        video: Video data dict with video_id, title, channel_name, playlist_item_id
-        database_id: Notion database ID
+def _validate_env_vars() -> tuple[str, str, str]:
+    """Validate required environment variables.
 
     Returns:
-        True if processing succeeded, False otherwise
+        Tuple of (input_playlist, output_playlist, database_id).
+
+    Raises:
+        APIError: If any required env vars are missing.
     """
-    video_id = video["video_id"]
-    title = video["title"]
-    channel = video["channel_name"]
-
-    logger.info(f"Processing: {title} ({video_id})")
-
-    # Get full video details
-    try:
-        details = get_video_details(youtube_service, video_id)
-        duration = format_duration(details.get("duration", ""))
-    except Exception as e:
-        logger.warning(f"Could not get video details: {e}")
-        duration = "Unknown"
-
-    # Fetch transcript
-    logger.info(f"  Fetching transcript...")
-    transcript = get_transcript(video_id)
-
-    video_data = {
-        "video_id": video_id,
-        "title": title,
-        "url": f"https://www.youtube.com/watch?v={video_id}",
-        "channel": channel,
-        "duration": duration,
-    }
-
-    if transcript is None:
-        # No transcript available - create error page but don't move video
-        error_msg = "No transcript available (captions disabled or not found)"
-        logger.warning(f"  {error_msg}: {title}")
-        send_processing_error_notification(title, video_data["url"], error_msg)
-        try:
-            create_error_page(notion_client, database_id, video_data, error_msg)
-            logger.info(f"  Created error entry in Notion")
-        except Exception as e:
-            logger.error(f"  Failed to create Notion error page: {e}")
-        return False
-
-    # Summarize with Claude
-    logger.info(f"  Summarizing with Gemini 3 Flash...")
-    summary_result = summarize_transcript(title, channel, transcript)
-
-    if "error" in summary_result:
-        error_msg = f"Summarization failed: {summary_result['error']}"
-        logger.error(f"  {error_msg}")
-        send_processing_error_notification(title, video_data["url"], error_msg)
-        try:
-            create_error_page(notion_client, database_id, video_data, error_msg)
-        except Exception as e:
-            logger.error(f"  Failed to create Notion error page: {e}")
-        return False
-
-    # Save to Notion
-    logger.info(f"  Saving to Notion...")
-
-    # Convert key_points list to bullet-point string for Notion
-    key_points = summary_result.get("key_points", [])
-    if isinstance(key_points, list):
-        key_points_str = "\n".join(f"• {point}" for point in key_points)
-    else:
-        key_points_str = key_points or ""
-
-    video_data.update({
-        "summary": summary_result.get("summary", ""),
-        "key_points": key_points_str,
-        "target_audience": summary_result.get("target_audience", ""),
-    })
-
-    try:
-        page_id = create_summary_page(notion_client, database_id, video_data)
-        logger.info(f"  Created Notion page: {page_id}")
-
-        # Send Slack notification
-        logger.info(f"  Sending Slack notification...")
-        if send_summary_notification(video_data):
-            logger.info(f"  Slack notification sent")
-        else:
-            logger.warning(f"  Slack notification skipped or failed")
-
-        return True
-    except Exception as e:
-        logger.error(f"  Failed to create Notion page: {e}")
-        return False
-
-
-def _handle_fatal_error(error_message: str) -> None:
-    """Record a fatal error with cooldown and notify via Slack, then exit."""
-    state = record_failure(error_message)
-    failures = state["consecutive_failures"]
-    backoff = state["backoff_minutes"]
-
-    send_error_notification(error_message, attempt=failures, next_retry_minutes=backoff)
-    sys.exit(1)
-
-
-def main():
-    """Main entry point for the YouTube Video Summarizer."""
-    # Load environment variables
-    load_dotenv()
-
-    # --- Cooldown check ---
-    # Skip this run if we're in an active cooldown from previous failures
-    skip, cooldown_state = should_skip_run()
-    if skip:
-        logger.info("Skipping run due to active cooldown. Exiting cleanly.")
-        sys.exit(0)
-
-    # Get required environment variables
     input_playlist = os.environ.get("YOUTUBE_INPUT_PLAYLIST")
     output_playlist = os.environ.get("YOUTUBE_OUTPUT_PLAYLIST")
     database_id = os.environ.get("NOTION_DATABASE_ID")
 
-    # Validate configuration
     missing = []
     if not input_playlist:
         missing.append("YOUTUBE_INPUT_PLAYLIST")
@@ -198,57 +94,153 @@ def main():
         missing.append("NOTION_DATABASE_ID")
 
     if missing:
-        error_msg = f"Missing required environment variables: {', '.join(missing)}"
-        logger.error(error_msg)
-        _handle_fatal_error(error_msg)
+        raise APIError(
+            f"Missing required environment variables: {', '.join(missing)}",
+            service="Configuration",
+            action_required=True,
+            user_message=f"Missing Environment Variables — Pipeline paused. Missing secrets: {', '.join(missing)}. Add them in GitHub repository settings.",
+            initial_backoff_minutes=1440,
+        )
+
+    return input_playlist, output_playlist, database_id
+
+
+def process_video(youtube_service, notion_client, video: dict, database_id: str) -> bool:
+    """Process a single video: fetch transcript, summarize, save to Notion.
+
+    Lets VideoError and APIError propagate to the caller for proper handling.
+
+    Args:
+        youtube_service: Authenticated YouTube API service
+        notion_client: Authenticated Notion client
+        video: Video data dict with video_id, title, channel_name, playlist_item_id
+        database_id: Notion database ID
+
+    Returns:
+        True if processing succeeded.
+
+    Raises:
+        VideoError: If this specific video can't be processed.
+        APIError: If an account/service-level error occurs.
+    """
+    video_id = video["video_id"]
+    title = video["title"]
+    channel = video["channel_name"]
+
+    logger.info(f"Processing: {title} ({video_id})")
+
+    # Get full video details (non-critical — default to Unknown on video-level errors)
+    try:
+        details = get_video_details(youtube_service, video_id)
+        duration = format_duration(details.get("duration", ""))
+    except VideoError:
+        duration = "Unknown"
+    # Note: APIError from get_video_details will propagate up
+
+    # Fetch transcript — raises VideoError or APIError
+    logger.info(f"  Fetching transcript...")
+    transcript = get_transcript(video_id)
+
+    # Summarize — raises VideoError or APIError
+    logger.info(f"  Summarizing with Gemini 3 Flash...")
+    summary_result = summarize_transcript(title, channel, transcript)
+
+    # Build video_data for Notion
+    key_points = summary_result.get("key_points", [])
+    if isinstance(key_points, list):
+        key_points_str = "\n".join(f"\u2022 {point}" for point in key_points)
+    else:
+        key_points_str = key_points or ""
+
+    video_data = {
+        "video_id": video_id,
+        "title": title,
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+        "channel": channel,
+        "duration": duration,
+        "summary": summary_result.get("summary", ""),
+        "key_points": key_points_str,
+        "target_audience": summary_result.get("target_audience", ""),
+    }
+
+    # Save to Notion — APIError propagates, other errors are video-level
+    logger.info(f"  Saving to Notion...")
+    page_id = create_summary_page(notion_client, database_id, video_data)
+    logger.info(f"  Created Notion page: {page_id}")
+
+    # Send Slack notification (non-critical)
+    logger.info(f"  Sending Slack notification...")
+    if send_summary_notification(video_data):
+        logger.info(f"  Slack notification sent")
+    else:
+        logger.warning(f"  Slack notification skipped or failed")
+
+    return True
+
+
+def _handle_api_error(e: APIError) -> None:
+    """Handle an API-level error: record cooldown, notify (first time only), exit."""
+    state = record_failure(str(e), e.initial_backoff_minutes)
+    # Only send Slack notification on the first failure (not on subsequent cooldown retries)
+    if state["consecutive_failures"] == 1:
+        send_api_error_notification(e.service, e.user_message, e.action_required)
+    else:
+        logger.info(
+            f"Suppressing Slack notification (failure #{state['consecutive_failures']}, "
+            f"already notified on first failure)"
+        )
+
+
+def main():
+    """Main entry point for the YouTube Video Summarizer."""
+    load_dotenv()
+
+    # --- Cooldown check ---
+    skip, cooldown_state = should_skip_run()
+    if skip:
+        logger.info("Skipping run due to active cooldown. Exiting cleanly.")
+        sys.exit(0)
 
     logger.info("=" * 60)
     logger.info("YouTube Video Summarizer")
     logger.info("=" * 60)
 
-    # Initialize services
-    logger.info("Initializing YouTube service...")
+    # --- Startup: validate config and initialize services ---
     try:
+        input_playlist, output_playlist, database_id = _validate_env_vars()
+        logger.info("Initializing YouTube service...")
         youtube_service = get_youtube_service()
-    except Exception as e:
-        error_msg = f"Failed to initialize YouTube service: {e}"
-        logger.error(error_msg)
-        _handle_fatal_error(error_msg)
-
-    logger.info("Initializing Notion client...")
-    try:
+        logger.info("Initializing Notion client...")
         notion_client = get_notion_client()
-    except Exception as e:
-        error_msg = f"Failed to initialize Notion client: {e}"
-        logger.error(error_msg)
-        _handle_fatal_error(error_msg)
+    except APIError as e:
+        logger.error(f"Startup failed: {e}")
+        _handle_api_error(e)
+        sys.exit(0)
 
-    # Get videos from input playlist
-    logger.info(f"Fetching videos from input playlist...")
+    # --- Fetch and filter videos ---
     try:
+        logger.info(f"Fetching videos from input playlist...")
         playlist_videos = get_playlist_videos(youtube_service, input_playlist)
         logger.info(f"Found {len(playlist_videos)} videos in input playlist")
-    except Exception as e:
-        error_msg = f"Failed to fetch playlist videos: {e}"
-        logger.error(error_msg)
-        _handle_fatal_error(error_msg)
+    except APIError as e:
+        logger.error(f"Failed to fetch playlist: {e}")
+        _handle_api_error(e)
+        sys.exit(0)
 
     if not playlist_videos:
         logger.info("No videos in input playlist. Nothing to do.")
         record_success()
         return
 
-    # Get already-processed video IDs from Notion
-    logger.info("Checking for already-processed videos...")
     try:
+        logger.info("Checking for already-processed videos...")
         processed_ids = get_processed_video_ids(notion_client, database_id)
-        logger.info(f"Found {len(processed_ids)} already-processed videos in Notion")
-    except Exception as e:
-        error_msg = f"Failed to fetch processed video IDs: {e}"
-        logger.error(error_msg)
-        _handle_fatal_error(error_msg)
+        logger.info(f"Found {len(processed_ids)} already-processed/skipped videos in Notion")
+    except APIError as e:
+        logger.error(f"Failed to check processed videos: {e}")
+        _handle_api_error(e)
+        sys.exit(0)
 
-    # Filter to only new videos
     new_videos = [v for v in playlist_videos if v["video_id"] not in processed_ids]
     logger.info(f"Found {len(new_videos)} new videos to process")
 
@@ -257,11 +249,15 @@ def main():
         record_success()
         return
 
-    # Process each new video
+    # --- Process each video ---
     processed_count = 0
+    skipped_count = 0
     error_count = 0
 
     for video in new_videos:
+        video_id = video["video_id"]
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+
         try:
             success = process_video(youtube_service, notion_client, video, database_id)
 
@@ -271,44 +267,68 @@ def main():
                 try:
                     move_video_to_playlist(
                         youtube_service,
-                        video["video_id"],
+                        video_id,
                         input_playlist,
                         output_playlist,
                         playlist_item_id=video.get("playlist_item_id")
                     )
                     logger.info(f"  Moved successfully")
                     processed_count += 1
-                except Exception as e:
-                    logger.error(f"  Failed to move video: {e}")
-                    error_count += 1
-            else:
-                error_count += 1
+                except VideoError as e:
+                    logger.warning(f"  Failed to move video (video-level): {e}")
+                    processed_count += 1
 
-        except Exception as e:
-            logger.error(f"Unexpected error processing {video['video_id']}: {e}")
+        except APIError as e:
+            # Account-level error: stop the entire pipeline with cooldown
+            logger.error(f"API error ({e.service}): {e}")
+            _handle_api_error(e)
+            logger.info(f"Pipeline stopped. Processed {processed_count} videos before error.")
+            sys.exit(0)
+
+        except VideoError as e:
+            # Video-specific error: increment retry, maybe skip
+            logger.warning(f"Video error for {video_id}: {e}")
             error_count += 1
 
-    # Summary
+            video_data = {
+                "video_id": video_id,
+                "title": video["title"],
+                "url": video_url,
+                "channel": video["channel_name"],
+                "duration": "",
+            }
+
+            new_count = increment_retry_count(
+                notion_client, database_id, video_data, str(e)
+            )
+
+            if new_count >= MAX_RETRIES:
+                mark_video_skipped(notion_client, database_id, video_id)
+                send_video_skipped_notification(
+                    video["title"],
+                    video["channel_name"],
+                    video_url,
+                    str(e),
+                )
+                skipped_count += 1
+                logger.info(f"  Video {video_id} skipped after {MAX_RETRIES} failures")
+
+        except Exception as e:
+            # Unexpected error: treat as video-level
+            logger.error(f"Unexpected error for {video_id}: {e}")
+            error_count += 1
+
+    # --- Summary ---
     logger.info("=" * 60)
     logger.info("Processing complete!")
     logger.info(f"  Successfully processed: {processed_count}")
-    logger.info(f"  Errors: {error_count}")
+    logger.info(f"  Errors (will retry): {error_count - skipped_count}")
+    logger.info(f"  Skipped (gave up): {skipped_count}")
     logger.info("=" * 60)
 
-    # --- Cooldown: record outcome ---
-    if error_count > 0 and processed_count == 0:
-        # Complete failure - activate/extend cooldown
-        _handle_fatal_error(f"All {error_count} video(s) failed to process")
-    else:
-        # At least partial success - clear cooldown
-        previous_state = record_success()
-        if previous_state:
-            prev_failures = previous_state.get("consecutive_failures", 0)
-            send_recovery_notification(prev_failures)
-            logger.info(f"Sent recovery notification (was failing for {prev_failures} runs)")
-
-        if error_count > 0:
-            sys.exit(1)
+    # Clear cooldown on any success (even partial)
+    if processed_count > 0:
+        record_success()
 
 
 if __name__ == "__main__":

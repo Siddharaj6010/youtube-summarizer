@@ -1,5 +1,5 @@
 """
-Slack notification module for sending video summaries.
+Slack notification module for sending video summaries and error alerts.
 
 Uses Slack incoming webhooks to post formatted messages to a channel.
 """
@@ -50,7 +50,7 @@ def send_summary_notification(video_data: dict) -> bool:
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"📺 {title}",
+                "text": f"New Video Summary",
                 "emoji": True
             }
         },
@@ -70,7 +70,7 @@ def send_summary_notification(video_data: dict) -> bool:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Summary*\n{summary}"
+                "text": f"*{title}*\n\n{summary}"
             }
         },
     ]
@@ -112,14 +112,17 @@ def send_summary_notification(video_data: dict) -> bool:
     return _send_slack_message(payload)
 
 
-def send_processing_error_notification(video_title: str, video_url: str, error_message: str) -> bool:
+def send_video_skipped_notification(
+    title: str, channel: str, url: str, error_msg: str
+) -> bool:
     """
-    Send a notification when a video fails to process (transcript, summarization, etc.).
+    Send a notification when a video is permanently skipped after max retries.
 
     Args:
-        video_title: Title of the video that failed.
-        video_url: YouTube URL of the video.
-        error_message: Description of what went wrong.
+        title: Video title.
+        channel: YouTube channel name.
+        url: YouTube video URL.
+        error_msg: The last error message.
 
     Returns:
         True if notification sent successfully, False otherwise.
@@ -133,7 +136,7 @@ def send_processing_error_notification(video_title: str, video_url: str, error_m
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": "Video Processing Error",
+                "text": "Video Skipped After 3 Failures",
                 "emoji": True
             }
         },
@@ -141,7 +144,7 @@ def send_processing_error_notification(video_title: str, video_url: str, error_m
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*{video_title}*"
+                "text": f"*{title}* by {channel} could not be processed after 3 attempts."
             }
         },
         {
@@ -151,7 +154,14 @@ def send_processing_error_notification(video_title: str, video_url: str, error_m
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Error*\n```{error_message[:1500]}```"
+                "text": f"*Last Error*\n```{error_msg[:1500]}```"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "You'll need to watch this one directly on YouTube."
             }
         },
         {
@@ -161,10 +171,11 @@ def send_processing_error_notification(video_title: str, video_url: str, error_m
                     "type": "button",
                     "text": {
                         "type": "plain_text",
-                        "text": "View Video",
+                        "text": "Watch on YouTube",
                         "emoji": True
                     },
-                    "url": video_url,
+                    "url": url,
+                    "style": "primary"
                 }
             ]
         },
@@ -172,20 +183,26 @@ def send_processing_error_notification(video_title: str, video_url: str, error_m
 
     payload = {
         "blocks": blocks,
-        "text": f"Processing error: {video_title} — {error_message[:200]}"
+        "text": f"Video skipped: {title} — {error_msg[:200]}"
     }
 
     return _send_slack_message(payload)
 
 
-def send_error_notification(error_message: str, attempt: int, next_retry_minutes: int) -> bool:
+def send_api_error_notification(
+    service: str, user_message: str, action_required: bool
+) -> bool:
     """
-    Send an error notification to Slack with cooldown context.
+    Send a notification for an API/account-level error.
+
+    Uses color coding:
+    - Red circle = requires manual action (top up credits, fix API key)
+    - Yellow circle = will auto-resolve (rate limits, server down, monthly resets)
 
     Args:
-        error_message: Description of the error.
-        attempt: Which consecutive failure this is (1 = first failure).
-        next_retry_minutes: Minutes until the next retry attempt.
+        service: Name of the failing service (e.g., "OpenRouter", "Supadata").
+        user_message: Clear, actionable message explaining the issue.
+        action_required: True if human action is needed.
 
     Returns:
         True if notification sent successfully, False otherwise.
@@ -195,99 +212,41 @@ def send_error_notification(error_message: str, attempt: int, next_retry_minutes
         logger.warning("SLACK_WEBHOOK_URL not set, skipping error notification")
         return False
 
-    if next_retry_minutes >= 1440:
-        retry_text = "24 hours"
-    elif next_retry_minutes >= 60:
-        hours = next_retry_minutes // 60
-        mins = next_retry_minutes % 60
-        retry_text = f"{hours}h {mins}m" if mins else f"{hours}h"
-    else:
-        retry_text = f"{next_retry_minutes} minutes"
+    emoji = ":red_circle:" if action_required else ":large_yellow_circle:"
 
     blocks = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": "YouTube Summarizer Failed",
+                "text": f"{service} Error",
                 "emoji": True
             }
         },
         {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"Attempt #{attempt}  |  Next retry in *{retry_text}*"
-                }
-            ]
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{emoji} {user_message}"
+            }
         },
         {
             "type": "divider"
         },
         {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Error*\n```{error_message[:1500]}```"
-            }
-        },
-    ]
-
-    if attempt == 1:
-        blocks.append({
             "type": "context",
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": "Retries will continue with increasing delays until the issue is resolved."
+                    "text": "Pipeline paused. Will retry on next scheduled run."
                 }
             ]
-        })
-
-    payload = {
-        "blocks": blocks,
-        "text": f"YouTube Summarizer failed (attempt #{attempt})"
-    }
-
-    return _send_slack_message(payload)
-
-
-def send_recovery_notification(previous_failures: int) -> bool:
-    """
-    Send a recovery notification after the workflow starts working again.
-
-    Args:
-        previous_failures: How many consecutive failures occurred before recovery.
-
-    Returns:
-        True if notification sent successfully, False otherwise.
-    """
-    webhook_url = get_webhook_url()
-    if not webhook_url:
-        return False
-
-    blocks = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": "YouTube Summarizer Recovered",
-                "emoji": True
-            }
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"The workflow is running successfully again after *{previous_failures}* consecutive failures."
-            }
         },
     ]
 
     payload = {
         "blocks": blocks,
-        "text": f"YouTube Summarizer recovered after {previous_failures} failures"
+        "text": f"{service} error: {user_message[:200]}"
     }
 
     return _send_slack_message(payload)

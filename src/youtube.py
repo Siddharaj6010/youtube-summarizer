@@ -15,6 +15,8 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build, Resource
 from googleapiclient.errors import HttpError
 
+from exceptions import VideoError, APIError
+
 # Load environment variables
 load_dotenv()
 
@@ -32,48 +34,15 @@ YOUTUBE_API_SERVICE_NAME = "youtube"
 YOUTUBE_API_VERSION = "v3"
 
 
-class YouTubeAPIError(Exception):
-    """Base exception for YouTube API errors."""
-    pass
-
-
-class QuotaExceededError(YouTubeAPIError):
-    """Raised when YouTube API quota is exceeded."""
-    pass
-
-
-class InvalidVideoError(YouTubeAPIError):
-    """Raised when a video ID is invalid or video not found."""
-    pass
-
-
-class AuthenticationError(YouTubeAPIError):
-    """Raised when authentication fails."""
-    pass
-
-
 def get_youtube_service() -> Resource:
     """
     Build and return an authenticated YouTube API service using refresh token.
-
-    Uses OAuth 2.0 credentials from environment variables to create a YouTube
-    API service client. The refresh token is used to obtain access tokens
-    automatically without browser interaction.
-
-    Environment variables required:
-        - YOUTUBE_CLIENT_ID: OAuth 2.0 client ID
-        - YOUTUBE_CLIENT_SECRET: OAuth 2.0 client secret
-        - YOUTUBE_REFRESH_TOKEN: OAuth 2.0 refresh token
 
     Returns:
         Resource: Authenticated YouTube API service object.
 
     Raises:
-        AuthenticationError: If credentials are missing or invalid.
-
-    Example:
-        >>> service = get_youtube_service()
-        >>> # Now use service to make API calls
+        APIError: If credentials are missing or authentication fails.
     """
     client_id = os.getenv("YOUTUBE_CLIENT_ID")
     client_secret = os.getenv("YOUTUBE_CLIENT_SECRET")
@@ -89,8 +58,12 @@ def get_youtube_service() -> Resource:
         missing_vars.append("YOUTUBE_REFRESH_TOKEN")
 
     if missing_vars:
-        raise AuthenticationError(
-            f"Missing required environment variables: {', '.join(missing_vars)}"
+        raise APIError(
+            f"Missing YouTube credentials: {', '.join(missing_vars)}",
+            service="YouTube",
+            action_required=True,
+            user_message=f"YouTube Credentials Missing — Pipeline paused. Missing secrets: {', '.join(missing_vars)}. Add them in GitHub repository settings.",
+            initial_backoff_minutes=1440,
         )
 
     try:
@@ -119,7 +92,13 @@ def get_youtube_service() -> Resource:
 
     except Exception as e:
         logger.error(f"Failed to authenticate with YouTube API: {e}")
-        raise AuthenticationError(f"Authentication failed: {e}") from e
+        raise APIError(
+            f"YouTube authentication failed: {e}",
+            service="YouTube",
+            action_required=True,
+            user_message="YouTube OAuth Token Refresh Failed — Pipeline paused. The YOUTUBE_REFRESH_TOKEN secret may need to be regenerated.",
+            initial_backoff_minutes=1440,
+        )
 
 
 def get_playlist_videos(
@@ -129,29 +108,16 @@ def get_playlist_videos(
     """
     Get all video information from a YouTube playlist.
 
-    Fetches all videos from the specified playlist, handling pagination
-    automatically to retrieve complete results.
-
     Args:
         service: Authenticated YouTube API service object.
-        playlist_id: The YouTube playlist ID (e.g., 'PLxxxxxx').
+        playlist_id: The YouTube playlist ID.
 
     Returns:
-        List of dicts, each containing:
-            - video_id: The YouTube video ID
-            - title: Video title
-            - channel_name: Name of the channel that uploaded the video
-            - playlist_item_id: The playlist item ID (needed for removal)
+        List of dicts with video_id, title, channel_name, playlist_item_id.
 
     Raises:
-        QuotaExceededError: If API quota is exceeded.
-        YouTubeAPIError: For other API errors.
-
-    Example:
-        >>> service = get_youtube_service()
-        >>> videos = get_playlist_videos(service, "PLxxxxxxx")
-        >>> for video in videos:
-        ...     print(f"{video['title']} by {video['channel_name']}")
+        APIError: For quota or authentication errors.
+        VideoError: For playlist-specific errors (e.g., not found).
     """
     videos = []
     next_page_token = None
@@ -160,17 +126,15 @@ def get_playlist_videos(
 
     try:
         while True:
-            # Build the request
             request = service.playlistItems().list(
                 part="snippet,contentDetails",
                 playlistId=playlist_id,
-                maxResults=50,  # Maximum allowed by API
+                maxResults=50,
                 pageToken=next_page_token,
             )
 
             response = request.execute()
 
-            # Process each item in the response
             for item in response.get("items", []):
                 snippet = item.get("snippet", {})
                 content_details = item.get("contentDetails", {})
@@ -183,7 +147,6 @@ def get_playlist_videos(
                 }
                 videos.append(video_info)
 
-            # Check for more pages
             next_page_token = response.get("nextPageToken")
             if not next_page_token:
                 break
@@ -207,22 +170,11 @@ def get_video_details(
         video_id: The YouTube video ID.
 
     Returns:
-        Dict containing:
-            - title: Video title
-            - channel: Channel name
-            - duration: Video duration in ISO 8601 format (e.g., 'PT4M13S')
-            - description: Video description
-            - published_at: Publication date in ISO 8601 format
+        Dict with title, channel, duration, description, published_at.
 
     Raises:
-        InvalidVideoError: If the video ID is invalid or video not found.
-        QuotaExceededError: If API quota is exceeded.
-        YouTubeAPIError: For other API errors.
-
-    Example:
-        >>> service = get_youtube_service()
-        >>> details = get_video_details(service, "dQw4w9WgXcQ")
-        >>> print(f"Title: {details['title']}, Duration: {details['duration']}")
+        VideoError: If the video is not found.
+        APIError: For quota or server errors.
     """
     logger.info(f"Fetching details for video: {video_id}")
 
@@ -236,8 +188,7 @@ def get_video_details(
 
         items = response.get("items", [])
         if not items:
-            logger.warning(f"Video not found: {video_id}")
-            raise InvalidVideoError(f"Video not found: {video_id}")
+            raise VideoError(f"Video not found: {video_id}", video_id=video_id)
 
         video = items[0]
         snippet = video.get("snippet", {})
@@ -253,6 +204,9 @@ def get_video_details(
 
         logger.info(f"Retrieved details for video: {details['title']}")
         return details
+
+    except (VideoError, APIError):
+        raise
 
     except HttpError as e:
         _handle_http_error(e, f"fetching video {video_id}")
@@ -275,14 +229,8 @@ def add_to_playlist(
         The playlist item ID of the newly added item.
 
     Raises:
-        InvalidVideoError: If the video ID is invalid.
-        QuotaExceededError: If API quota is exceeded.
-        YouTubeAPIError: For other API errors.
-
-    Example:
-        >>> service = get_youtube_service()
-        >>> item_id = add_to_playlist(service, "PLxxxxxxx", "dQw4w9WgXcQ")
-        >>> print(f"Added video with playlist item ID: {item_id}")
+        VideoError: If the video ID is invalid.
+        APIError: For quota or server errors.
     """
     logger.info(f"Adding video {video_id} to playlist {playlist_id}")
 
@@ -320,9 +268,6 @@ def remove_from_playlist(
     """
     Remove a video from a playlist using the playlist item ID.
 
-    Note: This requires the playlist_item_id, not the video_id.
-    Use get_playlist_videos() to obtain the playlist_item_id for each video.
-
     Args:
         service: Authenticated YouTube API service object.
         playlist_item_id: The playlist item ID (not the video ID).
@@ -331,13 +276,7 @@ def remove_from_playlist(
         True if removal was successful.
 
     Raises:
-        QuotaExceededError: If API quota is exceeded.
-        YouTubeAPIError: For other API errors.
-
-    Example:
-        >>> service = get_youtube_service()
-        >>> videos = get_playlist_videos(service, "PLxxxxxxx")
-        >>> remove_from_playlist(service, videos[0]["playlist_item_id"])
+        APIError: For quota or server errors.
     """
     logger.info(f"Removing playlist item: {playlist_item_id}")
 
@@ -366,33 +305,19 @@ def move_video_to_playlist(
     1. Add the video to the target playlist
     2. Remove it from the source playlist
 
-    If the add fails, the video remains in the source playlist.
-    If the remove fails after add succeeds, the video will be in both playlists.
-
     Args:
         service: Authenticated YouTube API service object.
         video_id: The video ID to move.
         source_playlist_id: The playlist to remove from.
         target_playlist_id: The playlist to add to.
-        playlist_item_id: Optional playlist item ID for removal. If not provided,
-            the function will fetch it from the source playlist.
+        playlist_item_id: Optional playlist item ID for removal.
 
     Returns:
         The new playlist item ID in the target playlist.
 
     Raises:
-        InvalidVideoError: If the video is not found in the source playlist.
-        QuotaExceededError: If API quota is exceeded.
-        YouTubeAPIError: For other API errors.
-
-    Example:
-        >>> service = get_youtube_service()
-        >>> new_item_id = move_video_to_playlist(
-        ...     service,
-        ...     video_id="dQw4w9WgXcQ",
-        ...     source_playlist_id="PLsource",
-        ...     target_playlist_id="PLtarget",
-        ... )
+        VideoError: If the video is not found in the source playlist.
+        APIError: For quota or server errors.
     """
     logger.info(
         f"Moving video {video_id} from {source_playlist_id} to {target_playlist_id}"
@@ -409,8 +334,9 @@ def move_video_to_playlist(
                 break
 
         if not playlist_item_id:
-            raise InvalidVideoError(
-                f"Video {video_id} not found in playlist {source_playlist_id}"
+            raise VideoError(
+                f"Video {video_id} not found in playlist {source_playlist_id}",
+                video_id=video_id,
             )
 
     # First, add to target playlist
@@ -419,7 +345,7 @@ def move_video_to_playlist(
     # Then, remove from source playlist
     try:
         remove_from_playlist(service, playlist_item_id)
-    except YouTubeAPIError as e:
+    except (VideoError, APIError) as e:
         logger.warning(
             f"Failed to remove video from source playlist after adding to target. "
             f"Video {video_id} may now exist in both playlists. Error: {e}"
@@ -441,15 +367,13 @@ def _handle_http_error(error: HttpError, context: str) -> None:
         context: Description of what operation was being performed.
 
     Raises:
-        QuotaExceededError: If API quota is exceeded.
-        InvalidVideoError: If a video or resource is not found.
-        YouTubeAPIError: For other API errors.
+        APIError: For quota, auth, and server errors.
+        VideoError: For resource-specific errors (not found, etc.).
     """
     status_code = error.resp.status
     error_reason = ""
 
     try:
-        # Try to extract the error reason from the response
         import json
         error_details = json.loads(error.content.decode("utf-8"))
         errors = error_details.get("error", {}).get("errors", [])
@@ -460,16 +384,39 @@ def _handle_http_error(error: HttpError, context: str) -> None:
 
     logger.error(f"YouTube API error while {context}: {error}")
 
-    # Handle quota exceeded
+    # Quota exceeded — account-level (resets at midnight PT)
     if status_code == 403 and error_reason in ("quotaExceeded", "dailyLimitExceeded"):
-        raise QuotaExceededError(
-            f"YouTube API quota exceeded. Please try again later. "
-            f"Error while {context}: {error}"
+        raise APIError(
+            f"YouTube API quota exceeded while {context}",
+            service="YouTube",
+            action_required=False,
+            user_message="YouTube Daily Quota Exceeded — Pipeline paused. The YouTube API daily limit (10,000 units) has been hit. No action needed — resets at midnight Pacific Time.",
+            initial_backoff_minutes=1440,
         )
 
-    # Handle not found
-    if status_code == 404 or error_reason == "videoNotFound":
-        raise InvalidVideoError(f"Resource not found while {context}: {error}")
+    # Auth errors — account-level
+    if status_code == 401:
+        raise APIError(
+            f"YouTube API unauthorized while {context}",
+            service="YouTube",
+            action_required=True,
+            user_message="YouTube API Unauthorized — Pipeline paused. The YouTube OAuth credentials may have been revoked. Check the YOUTUBE_REFRESH_TOKEN secret.",
+            initial_backoff_minutes=1440,
+        )
 
-    # Handle other errors
-    raise YouTubeAPIError(f"API error while {context}: {error}")
+    # Server errors — account-level (temporary)
+    if status_code >= 500:
+        raise APIError(
+            f"YouTube API server error while {context}",
+            service="YouTube",
+            action_required=False,
+            user_message=f"YouTube API Temporarily Down (HTTP {status_code}) — Pipeline paused. Will retry automatically on next scheduled run.",
+            initial_backoff_minutes=30,
+        )
+
+    # Not found — video-level
+    if status_code == 404 or error_reason == "videoNotFound":
+        raise VideoError(f"Resource not found while {context}: {error}")
+
+    # Other errors — treat as video-level
+    raise VideoError(f"YouTube API error while {context}: {error}")
