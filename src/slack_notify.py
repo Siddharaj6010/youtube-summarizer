@@ -87,6 +87,19 @@ def send_summary_notification(video_data: dict) -> bool:
             }
         })
 
+    # Add target audience if available
+    target_audience = video_data.get("target_audience", "")
+    if target_audience:
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Target Audience:* {target_audience}"
+                }
+            ]
+        })
+
     # Add video link button
     blocks.append({
         "type": "actions",

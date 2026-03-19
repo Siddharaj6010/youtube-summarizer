@@ -141,20 +141,20 @@ def summarize_transcript(
     transcript = _truncate_transcript(transcript)
 
     # Build the user prompt
-    user_prompt = f"""Summarize this YouTube video transcript. Be specific and informative but keep it skimmable.
+    user_prompt = f"""Summarize this YouTube video transcript. Be specific and informative but keep it skimmable. Scale your response to match the video — a short or simple video needs fewer sentences and points than a long or dense one.
 
 Title: {title}
 Channel: {channel}
 Transcript: {transcript}
 
 Provide:
-1. A single-paragraph summary (5-8 sentences) covering the main topics and conclusions. Include specific details like names, prices, specs, and tools when relevant — avoid vague statements like "he discusses the product."
-2. 5-10 key points capturing the most important takeaways. Each point should be one concise sentence with specific details.
+1. A single-paragraph summary covering the main topics and conclusions. Include specific details like names, prices, specs, and tools when relevant — avoid vague statements like "he discusses the product." Use as many sentences as the content warrants.
+2. Key points capturing the most important takeaways. Each point should be one concise sentence with specific details. Include as many or as few as the video warrants.
 3. Who would find this video useful (1-2 sentences)
 
 Format your response as:
 SUMMARY:
-[single paragraph, 5-8 sentences]
+[single paragraph]
 
 KEY POINTS:
 - [point 1]

@@ -193,6 +193,9 @@ def create_summary_page(client: Client, database_id: str, video_data: dict) -> s
         "Key Points": {
             "rich_text": _make_rich_text_blocks(video_data.get("key_points", ""))
         },
+        "Target Audience": {
+            "rich_text": [{"text": {"content": video_data.get("target_audience", "")}}]
+        },
         "Duration": {
             "rich_text": [{"text": {"content": video_data.get("duration", "")}}]
         },
