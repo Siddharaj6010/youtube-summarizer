@@ -50,7 +50,7 @@ def send_summary_notification(video_data: dict) -> bool:
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"New Video Summary",
+                "text": f"{title}",
                 "emoji": True
             }
         },
@@ -70,7 +70,7 @@ def send_summary_notification(video_data: dict) -> bool:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*{title}*\n\n{summary}"
+                "text": f"*Summary*\n{summary}"
             }
         },
     ]
