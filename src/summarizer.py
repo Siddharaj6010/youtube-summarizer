@@ -101,9 +101,15 @@ def _parse_response(response_text: str) -> dict:
     )
     if key_points_match:
         points_text = key_points_match.group(1).strip()
-        # Parse bullet points (handle various bullet formats: -, *, •)
-        points = re.findall(r"^[\-\*\u2022]\s*(.+)$", points_text, re.MULTILINE)
+        # Parse bullet/numbered points (-, *, •, 1., 2), etc.)
+        points = re.findall(r"^(?:[-*\u2022]|\d+[.\)])\s*(.+)$", points_text, re.MULTILINE)
         result["key_points"] = [point.strip() for point in points if point.strip()]
+
+        if points_text and not result["key_points"]:
+            raise VideoError(
+                f"KEY POINTS section had text but no points could be parsed. "
+                f"Raw text: {points_text[:200]}"
+            )
 
     # Extract TARGET AUDIENCE section
     audience_match = re.search(
@@ -145,7 +151,6 @@ def summarize_transcript(
 
 Title: {title}
 Channel: {channel}
-Transcript: {transcript}
 
 Provide:
 1. A single-paragraph summary covering the main topics and conclusions. Include specific details like names, prices, specs, and tools when relevant — avoid vague statements like "he discusses the product." Use as many sentences as the content warrants.
@@ -162,7 +167,11 @@ KEY POINTS:
 ...
 
 TARGET AUDIENCE:
-[who would benefit]"""
+[who would benefit]
+
+<transcript>
+{transcript}
+</transcript>"""
 
     system_prompt = "You summarize YouTube video transcripts in a way that is specific and informative yet skimmable. You include concrete details (names, numbers, specs) rather than vague generalizations, but you stay concise."
 
@@ -172,6 +181,7 @@ TARGET AUDIENCE:
         response = client.chat.completions.create(
             model=MODEL_ID,
             max_tokens=MAX_TOKENS,
+            temperature=0.3,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
